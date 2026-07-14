@@ -20,11 +20,11 @@ requirement is Xcode.**
 
 ```bzl
 # MODULE.bazel
-bazel_dep(name = "rules_idb", version = "0.1.0")
+bazel_dep(name = "rules_idb", version = "0.1.1")
 git_override(  # until rules_idb is published to the Bazel Central Registry
     module_name = "rules_idb",
     remote = "https://github.com/erneestoc/rules_idb.git",
-    commit = "<pin a commit>",
+    tag = "v0.1.1",
 )
 ```
 
@@ -125,7 +125,7 @@ the bundled binaries.
 | `device_type` | newest iPhone | `xcrun simctl list devicetypes` name |
 | `os_version` | newest iOS | `xcrun simctl list runtimes` version |
 | `pool_size` | `0` (on demand) | max simulators per (device, OS) pool |
-| `max_concurrent_boots` | `3` | machine-wide cap on simultaneous simulator boots |
+| `max_concurrent_boots` | `4` | machine-wide cap on simultaneous simulator boots |
 | `random` | `False` | run tests in random order (requires test host) |
 | `shutdown_simulator_after_test` | `False` | shut simulator down after each test |
 | `idb_path` | `idb` | path to the idb client |
@@ -169,10 +169,12 @@ never grows beyond that number of simulators.
 
 ### Boot concurrency and pre-booting
 
-Simulator boots are I/O heavy: booting many at once is slower than
-staggering them. Boots (and only boots — warm simulators are unaffected)
-are gated machine-wide to **3 concurrent** by default; tune with the
-`max_concurrent_boots` attribute or `RULES_IDB_MAX_CONCURRENT_BOOTS`.
+Boots (and only boots — warm simulators are unaffected) are gated
+machine-wide to **4 concurrent** by default; tune with the
+`max_concurrent_boots` attribute or `RULES_IDB_MAX_CONCURRENT_BOOTS`. The
+optimum is machine-dependent — on an M4 Max, booting 4 simulators took 13s
+at cap 4 vs 31s serialized, so cap boots only as hard as your hardware
+requires (low-memory CI agents may want 2).
 
 To start warm — e.g. at CI-agent startup or before a big local run:
 

@@ -145,11 +145,13 @@ used.
 """,
         ),
         "max_concurrent_boots": attr.int(
-            default = 3,
+            default = 4,
             doc = """
 Maximum number of simulators booted concurrently, machine-wide across all
-pools and test actions. Simulator boots are I/O heavy; booting many at once
-is slower than staggering them. Already-booted simulators are unaffected.
+pools and test actions. Already-booted simulators are unaffected. The
+optimum is machine-dependent (measured on an M4 Max: 4 concurrent re-boots
+of 4 simulators took 13s vs 31s fully serialized, so parallelism wins on
+strong hardware; low-memory or busy CI machines benefit from a lower cap).
 Can be overridden at test time with the `RULES_IDB_MAX_CONCURRENT_BOOTS`
 environment variable.
 """,
