@@ -1,0 +1,5 @@
+bazel-*
+.venv/
+.venv-src/
+tools/idb-dist/
+benchmark/results/

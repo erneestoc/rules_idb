@@ -1,0 +1,365 @@
+diff --git a/Companion/Reporting/FBiOSTargetDescription.swift b/Companion/Reporting/FBiOSTargetDescription.swift
+index e4bdf57..4ae6f1a 100644
+--- a/Companion/Reporting/FBiOSTargetDescription.swift
++++ b/Companion/Reporting/FBiOSTargetDescription.swift
+@@ -53,8 +53,8 @@ import Foundation
+       Self.keyModel: model as Any? ?? NSNull(),
+       Self.keyName: name as Any? ?? NSNull(),
+       Self.keyOSVersion: osVersion.name as Any? ?? NSNull(),
+-      Self.keyState: FBiOSTargetStateStringFromState(state),
+-      Self.keyType: FBiOSTargetTypeStringFromTargetType(targetType),
++      Self.keyState: FBiOSTargetStateStringRepresentation(state),
++      Self.keyType: FBiOSTargetTypeStringRepresentation(targetType),
+       Self.keyUDID: udid as Any? ?? NSNull(),
+     ]
+     for (key, value) in extendedInformation {
+diff --git a/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
+index 711e9e1..e91451b 100644
+--- a/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
+@@ -23,8 +23,8 @@ struct DescribeMethodHandler {
+       $0.targetDescription = .with {
+         $0.udid = target.udid
+         $0.name = target.name
+-        $0.state = FBiOSTargetStateStringFromState(target.state).rawValue
+-        $0.targetType = FBiOSTargetTypeStringFromTargetType(target.targetType).lowercased()
++        $0.state = FBiOSTargetStateStringRepresentation(target.state).rawValue
++        $0.targetType = String(FBiOSTargetTypeStringRepresentation(target.targetType)).lowercased()
+         $0.osVersion = target.osVersion.name.rawValue
+         if let screenInfo = target.screenInfo {
+           $0.screenDimensions = .with {
+diff --git a/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
+index e31f12a..2e966c6 100644
+--- a/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
+@@ -11,6 +11,30 @@ import Foundation
+ import GRPC
+ import IDBGRPCSwift
+ 
++/// Owns the single AsyncIterator of a gRPC request stream. grpc-swift's
++/// GRPCAsyncRequestStream traps if more than one iterator is ever created,
++/// so every read for one RPC must go through the same instance.
++private final class SingleIteratorRequestStream<S: AsyncSequence> {
++  private var iterator: S.AsyncIterator
++
++  init(_ sequence: S) {
++    self.iterator = sequence.makeAsyncIterator()
++  }
++
++  func next() async throws -> S.Element? {
++    try await iterator.next()
++  }
++
++  var requiredNext: S.Element {
++    get async throws {
++      guard let next = try await next() else {
++        throw StreamReadError<S.Element>.nextElementNotProduced
++      }
++      return next
++    }
++  }
++}
++
+ struct InstallMethodHandler {
+ 
+   let commandExecutor: FBIDBCommandExecutor
+@@ -18,7 +42,8 @@ struct InstallMethodHandler {
+ 
+   func handle(requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_InstallResponse>, context: GRPCAsyncServerCallContext) async throws {
+ 
+-    let artifact = try await install(requestStream: requestStream, responseStream: responseStream)
++    let stream = SingleIteratorRequestStream(requestStream)
++    let artifact = try await install(stream: stream, responseStream: responseStream)
+ 
+     let response = Idb_InstallResponse.with {
+       $0.name = artifact.name
+@@ -27,7 +52,7 @@ struct InstallMethodHandler {
+     try await responseStream.send(response)
+   }
+ 
+-  private func install(requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_InstallResponse>) async throws -> FBInstalledArtifact {
++  private func install(stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_InstallRequest>>, responseStream: GRPCAsyncResponseStreamWriter<Idb_InstallResponse>) async throws -> FBInstalledArtifact {
+ 
+     func extractPayloadFromRequest() throws -> Idb_Payload {
+       guard let payload = request.extractPayload() else {
+@@ -36,34 +61,34 @@ struct InstallMethodHandler {
+       return payload
+     }
+ 
+-    var request = try await requestStream.requiredNext
++    var request = try await stream.requiredNext
+ 
+     guard case let .destination(destination) = request.value else {
+       throw GRPCStatus(code: .failedPrecondition, message: "Expected destination as first request in stream")
+     }
+-    request = try await requestStream.requiredNext
++    request = try await stream.requiredNext
+ 
+     var name = UUID().uuidString
+     if case let .nameHint(nameHint) = request.value {
+       name = nameHint
+-      request = try await requestStream.requiredNext
++      request = try await stream.requiredNext
+     }
+ 
+     var makeDebuggable = false
+     if case let .makeDebuggable(debuggable) = request.value {
+       makeDebuggable = debuggable
+-      request = try await requestStream.requiredNext
++      request = try await stream.requiredNext
+     }
+     var overrideModificationTime = false
+     if case let .overrideModificationTime(omtime) = request.value {
+       overrideModificationTime = omtime
+-      request = try await requestStream.requiredNext
++      request = try await stream.requiredNext
+     }
+ 
+     var skipSigningBundles = false
+     if case let .skipSigningBundles(skip) = request.value {
+       skipSigningBundles = skip
+-      request = try await requestStream.requiredNext
++      request = try await stream.requiredNext
+     }
+ 
+     var linkToBundle: FBDsymInstallLinkToBundle?
+@@ -71,12 +96,12 @@ struct InstallMethodHandler {
+     // (2022-03-02) REMOVE! Keeping only for retrocompatibility
+     if case let .bundleID(id) = request.value {
+       linkToBundle = .init(id, bundle_type: .app)
+-      request = try await requestStream.requiredNext
++      request = try await stream.requiredNext
+     }
+ 
+     if case let .linkDsymToBundle(link) = request.value {
+       linkToBundle = readLinkBundleToDsym(from: link)
+-      request = try await requestStream.requiredNext
++      request = try await stream.requiredNext
+     }
+ 
+     var payload = try extractPayloadFromRequest()
+@@ -84,14 +109,14 @@ struct InstallMethodHandler {
+     var compression = FBCompressionFormat.GZIP
+     if case let .compression(format) = payload.source {
+       compression = readCompressionFormat(from: format)
+-      request = try await requestStream.requiredNext
++      request = try await stream.requiredNext
+       payload = try extractPayloadFromRequest()
+     }
+ 
+     return try await installData(
+       from: payload.source,
+       to: destination,
+-      requestStream: requestStream,
++      stream: stream,
+       name: name,
+       makeDebuggable: makeDebuggable,
+       linkToBundle: linkToBundle,
+@@ -103,7 +128,7 @@ struct InstallMethodHandler {
+   private func installData(
+     from source: Idb_Payload.OneOf_Source?,
+     to destination: Idb_InstallRequest.Destination,
+-    requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>,
++    stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_InstallRequest>>,
+     name: String,
+     makeDebuggable: Bool,
+     linkToBundle: FBDsymInstallLinkToBundle?,
+@@ -131,7 +156,7 @@ struct InstallMethodHandler {
+ 
+     switch source {
+     case let .data(data):
+-      let dataStream = pipeToInputOutput(initial: data, requestStream: requestStream) as! FBProcessInput<AnyObject>
++      let dataStream = pipeToInputOutput(initial: data, stream: stream) as! FBProcessInput<AnyObject>
+       return try await installSource(dataStream: dataStream, skipSigningBundles: skipSigningBundles)
+ 
+     case let .url(urlString):
+@@ -164,7 +189,7 @@ struct InstallMethodHandler {
+     }
+   }
+ 
+-  private func pipeToInputOutput(initial: Data, requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>) -> FBProcessInput<OutputStream> {
++  private func pipeToInputOutput(initial: Data, stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_InstallRequest>>) -> FBProcessInput<OutputStream> {
+     let input = FBProcessInput<OutputStream>.fromStream()
+     let appStream = input.contents
+     Task {
+@@ -175,7 +200,7 @@ struct InstallMethodHandler {
+       appStream.write(&buffer, maxLength: buffer.count)
+ 
+       do {
+-        for try await request in requestStream {
++        while let request = try await stream.next() {
+           guard let data = request.extractDataFrame() else {
+             continue
+           }
+diff --git a/Companion/main.swift b/Companion/main.swift
+index 66bec15..e874e40 100644
+--- a/Companion/main.swift
++++ b/Companion/main.swift
+@@ -350,7 +350,7 @@ private func runCompanionServer(_ udid: String, userDefaults: UserDefaults, xcod
+       addMetadataSel,
+       with: [
+         "udid": udid,
+-        "target_type": FBiOSTargetTypeStringFromTargetType(target.targetType).lowercased(),
++        "target_type": String(FBiOSTargetTypeStringRepresentation(target.targetType)).lowercased(),
+       ])
+   }
+   reporter.report(FBEventReporterSubject(forEvent: "launched"))
+diff --git a/Companion/project.yml b/Companion/project.yml
+index 9f3e841..174b4ea 100644
+--- a/Companion/project.yml
++++ b/Companion/project.yml
+@@ -42,6 +42,24 @@ packages:
+     from: 1.3.0
+ 
+ targets:
++  ReplProtocol:
++    type: framework
++    platform: macOS
++    deploymentTarget: "12.0"
++    sources:
++      - path: ../REPL/ReplProtocol
++    settings:
++      base:
++        MACOSX_DEPLOYMENT_TARGET: "12.0"
++        PRODUCT_BUNDLE_IDENTIFIER: com.facebook.ReplProtocol
++        PRODUCT_NAME: ReplProtocol
++        DEFINES_MODULE: YES
++        MACH_O_TYPE: staticlib
++        SWIFT_VERSION: "6.0"
++        GENERATE_INFOPLIST_FILE: YES
++    dependencies:
++      - sdk: Foundation.framework
++
+   IDBGRPCSwift:
+     type: framework
+     platform: macOS
+@@ -168,6 +186,8 @@ targets:
+         embed: false
+       - target: IDBGRPCSwift
+         embed: false
++      - target: ReplProtocol
++        embed: false
+       - sdk: Foundation.framework
+ 
+   # The `idb-repl` CLI (Buck: fbsource//fbobjc/Tools/idb:idb-repl). A small gRPC
+diff --git a/FBControlCore/Management/FBiOSTarget.h b/FBControlCore/Management/FBiOSTarget.h
+index 206a889..21152dc 100644
+--- a/FBControlCore/Management/FBiOSTarget.h
++++ b/FBControlCore/Management/FBiOSTarget.h
+@@ -26,7 +26,7 @@
+ /**
+  The canonical string representation of the state enum.
+  */
+-FOUNDATION_EXTERN FBiOSTargetStateString _Nonnull FBiOSTargetStateStringFromState(FBiOSTargetState state);
++FOUNDATION_EXTERN FBiOSTargetStateString _Nonnull FBiOSTargetStateStringFromState(FBiOSTargetState state) NS_SWIFT_UNAVAILABLE("Use the FBControlCore Swift module declaration");
+ 
+ /**
+  The canonical enum representation of the state string.
+@@ -36,7 +36,7 @@ FOUNDATION_EXTERN FBiOSTargetState FBiOSTargetStateFromStateString(FBiOSTargetSt
+ /**
+  The canonical string representations of the FBiOSTargetType Enum.
+  */
+-FOUNDATION_EXTERN NSString *_Nonnull FBiOSTargetTypeStringFromTargetType(FBiOSTargetType targetType);
++FOUNDATION_EXTERN NSString *_Nonnull FBiOSTargetTypeStringFromTargetType(FBiOSTargetType targetType) NS_SWIFT_UNAVAILABLE("Use the FBControlCore Swift module declaration");
+ 
+ /**
+  A Default Comparison Function that can be called for different implementations of FBiOSTarget.
+diff --git a/FBControlCore/Management/FBiOSTarget.swift b/FBControlCore/Management/FBiOSTarget.swift
+index 05ba57b..27fcdea 100644
+--- a/FBControlCore/Management/FBiOSTarget.swift
++++ b/FBControlCore/Management/FBiOSTarget.swift
+@@ -108,7 +108,7 @@ import Foundation
+ 
+ /// The canonical string representation of the state enum.
+ @_cdecl("FBiOSTargetStateStringFromState")
+-func FBiOSTargetStateStringFromState(_ state: FBiOSTargetState) -> FBiOSTargetStateString {
++public func FBiOSTargetStateStringRepresentation(_ state: FBiOSTargetState) -> FBiOSTargetStateString {
+   switch state {
+   case .creating:
+     return .creating
+@@ -166,7 +166,7 @@ func FBiOSTargetStateFromStateString(_ stateString: FBiOSTargetStateString) -> F
+ 
+ /// The canonical string representations of the FBiOSTargetType enum.
+ @_cdecl("FBiOSTargetTypeStringFromTargetType")
+-func FBiOSTargetTypeStringFromTargetType(_ targetType: FBiOSTargetType) -> NSString {
++public func FBiOSTargetTypeStringRepresentation(_ targetType: FBiOSTargetType) -> NSString {
+   if targetType == .device {
+     return "Device"
+   }
+@@ -230,7 +230,7 @@ func FBiOSTargetComparison(_ left: FBiOSTarget, _ right: FBiOSTarget) -> Compari
+ /// Constructs a string description of the provided target.
+ @_cdecl("FBiOSTargetDescribe")
+ func FBiOSTargetDescribe(_ target: FBiOSTargetInfo) -> NSString {
+-  return "\(target.udid) | \(target.name) | \(FBiOSTargetStateStringFromState(target.state).rawValue) | \(target.deviceType.model.rawValue) | \(target.osVersion) " as NSString
++  return "\(target.udid) | \(target.name) | \(FBiOSTargetStateStringRepresentation(target.state).rawValue) | \(target.deviceType.model.rawValue) | \(target.osVersion) " as NSString
+ }
+ 
+ /// Constructs an NSPredicate matching the specified UDID.
+diff --git a/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift b/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift
+index 841b8f0..c392ed4 100644
+--- a/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift
++++ b/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift
+@@ -26,7 +26,7 @@ enum DefaultsModificationError: Error, CustomStringConvertible {
+     case let .couldNotWritePlist(plist):
+       return "Failed to write out defaults to temporary file \(plist)"
+     case let .invalidState(state, action):
+-      return "Cannot \(action) a plist when the Simulator state is \(FBiOSTargetStateStringFromState(state)), should be \(FBiOSTargetStateString.shutdown) or \(FBiOSTargetStateString.booted)"
++      return "Cannot \(action) a plist when the Simulator state is \(FBiOSTargetStateStringRepresentation(state)), should be \(FBiOSTargetStateString.shutdown) or \(FBiOSTargetStateString.booted)"
+     case let .commandFailed(command, exitCode, stderr):
+       return "defaults \(command) failed with exit code \(exitCode): \(stderr)"
+     }
+diff --git a/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift b/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift
+index eb13025..73bcb45 100644
+--- a/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift
++++ b/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift
+@@ -50,7 +50,7 @@ class FBSimulatorControlTests_SimDevice_Double: NSObject {
+   }
+ 
+   var stateString: FBiOSTargetStateString {
+-    return FBiOSTargetStateStringFromState(FBiOSTargetState(rawValue: UInt(state))!)
++    return FBiOSTargetStateStringRepresentation(FBiOSTargetState(rawValue: UInt(state))!)
+   }
+ }
+ 
+diff --git a/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift b/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
+index d1f393f..99ebd25 100644
+--- a/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
++++ b/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
+@@ -110,6 +110,11 @@ public class FBTestRunnerConfiguration: NSObject, NSCopying {
+       (developerLibraryPath as NSString).appendingPathComponent("Frameworks"),
+       (developerLibraryPath as NSString).appendingPathComponent("PrivateFrameworks"),
+       platformDeveloperFrameworksPath,
++      // Contains libXCTestSwiftSupport.dylib and libXCTestBundleInject.dylib,
++      // which Swift test bundles link via @rpath. This path lands in
++      // DYLD_FALLBACK_LIBRARY_PATH, mirroring the DYLD_LIBRARY_PATH that
++      // Xcode's own xctestrun-based runners set.
++      (platformRoot as NSString).appendingPathComponent("Developer/usr/lib"),
+     ]
+ 
+     let automationFrameworkPath = (developerLibraryPath as NSString).appendingPathComponent("PrivateFrameworks/XCTAutomationSupport.framework")
+diff --git a/protoc_compiler_template.py b/protoc_compiler_template.py
+index 5d9522b..75f8d6e 100755
+--- a/protoc_compiler_template.py
++++ b/protoc_compiler_template.py
+@@ -3,17 +3,11 @@
+ # This source code is licensed under the MIT license found in the
+ # LICENSE file in the root directory of this source tree.
+ 
+-# EASY-INSTALL-ENTRY-SCRIPT: 'grpclib==0.4.1','console_scripts','protoc-gen-python_grpc'
+-__requires__ = "grpclib==0.4.1"
+-import re
++# Invokes the grpclib protoc plugin directly; the pkg_resources-based
++# entry-point loader this file used to contain was removed from setuptools.
+ import sys
+ 
+-from pkg_resources import load_entry_point
++from grpclib.plugin.main import main
+ 
+ if __name__ == "__main__":
+-    sys.argv[0] = re.sub(r"(-script\.pyw?|\.exe)?$", "", sys.argv[0])
+-    sys.exit(
+-        load_entry_point(
+-            "grpclib==0.4.1", "console_scripts", "protoc-gen-python_grpc"
+-        )()
+-    )
++    sys.exit(main())

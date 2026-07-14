@@ -1,0 +1,114 @@
+load("@rules_apple//apple:ios.bzl", "ios_application", "ios_unit_test")
+load("@rules_swift//swift:swift.bzl", "swift_library")
+load("@rules_idb//idb:idb_test_runner.bzl", "ios_idb_test_runner")
+
+MINIMUM_OS_VERSION = "16.0"
+
+swift_library(
+    name = "HostAppLib",
+    srcs = ["HostApp/AppDelegate.swift"],
+    module_name = "HostApp",
+)
+
+ios_application(
+    name = "HostApp",
+    bundle_id = "com.rulesidb.example.HostApp",
+    families = ["iphone"],
+    infoplists = ["HostApp/Info.plist"],
+    minimum_os_version = MINIMUM_OS_VERSION,
+    deps = [":HostAppLib"],
+)
+
+swift_library(
+    name = "HostedTestsLib",
+    testonly = True,
+    srcs = ["Tests/HostedTests.swift"],
+    module_name = "HostedTests",
+)
+
+ios_idb_test_runner(
+    name = "idb_runner",
+    device_type = "iPhone 17 Pro",
+)
+
+# Runs with the idb-based runner from this repository.
+ios_unit_test(
+    name = "HostedTests",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    test_host = ":HostApp",
+    deps = [":HostedTestsLib"],
+)
+
+# The same tests with the stock rules_apple xcodebuild-based runner, for
+# benchmarking against.
+ios_unit_test(
+    name = "HostedTests_xcodebuild",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = "@rules_apple//apple/testing/default_runner:ios_xctestrun_ordered_runner",
+    test_host = ":HostApp",
+    deps = [":HostedTestsLib"],
+)
+
+swift_library(
+    name = "FailingTestsLib",
+    testonly = True,
+    srcs = ["Tests/FailingTests.swift"],
+    module_name = "FailingTests",
+)
+
+# Intentionally failing; used to validate the runner's failure detection.
+ios_unit_test(
+    name = "FailingTests",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    tags = ["manual"],
+    test_host = ":HostApp",
+    deps = [":FailingTestsLib"],
+)
+
+swift_library(
+    name = "LogicTestsLib",
+    testonly = True,
+    srcs = ["Tests/LogicTests.swift"],
+    module_name = "LogicTests",
+)
+
+# Hostless (logic) tests run through `idb xctest run logic`.
+ios_unit_test(
+    name = "LogicTests",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    deps = [":LogicTestsLib"],
+)
+
+# Sharded copies used to demonstrate/benchmark concurrent simulator usage via
+# --local_test_jobs=N. Each target is an independent test action, so Bazel can
+# run them in parallel; the idb runner hands each one its own pooled simulator.
+[
+    ios_unit_test(
+        name = "HostedTestsShard%d" % i,
+        size = "medium",
+        minimum_os_version = MINIMUM_OS_VERSION,
+        runner = ":idb_runner",
+        test_host = ":HostApp",
+        deps = [":HostedTestsLib"],
+    )
+    for i in range(1, 5)
+]
+
+[
+    ios_unit_test(
+        name = "HostedTestsShard%d_xcodebuild" % i,
+        size = "medium",
+        minimum_os_version = MINIMUM_OS_VERSION,
+        runner = "@rules_apple//apple/testing/default_runner:ios_xctestrun_ordered_runner",
+        test_host = ":HostApp",
+        deps = [":HostedTestsLib"],
+    )
+    for i in range(1, 5)
+]

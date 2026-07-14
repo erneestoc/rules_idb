@@ -1,0 +1,21 @@
+"""rules_idb: idb-based test runners for rules_apple tests."""
+
+module(
+    name = "rules_idb",
+    version = "0.1.0",
+    bazel_compatibility = [">=7.0.0"],
+    compatibility_level = 1,
+)
+
+bazel_dep(name = "apple_support", version = "2.7.0")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "rules_apple", version = "4.5.3")
+bazel_dep(name = "rules_swift", version = "3.6.1")
+bazel_dep(name = "rules_shell", version = "0.6.1")
+
+# Uncomment to develop against a local rules_apple checkout:
+# local_path_override(
+#     module_name = "rules_apple",
+#     path = "../rules_apple",
+# )

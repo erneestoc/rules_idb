@@ -1,0 +1,13 @@
+load(":idb_test_runner.bzl", "ios_idb_test_runner")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "idb_test_runner.template.sh",
+])
+
+# A ready-to-use runner: newest available iPhone device type and iOS runtime,
+# unbounded warm simulator pool.
+ios_idb_test_runner(
+    name = "default_runner",
+)
