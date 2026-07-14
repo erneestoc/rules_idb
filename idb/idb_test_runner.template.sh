@@ -176,8 +176,11 @@ test_bundle_dir="$test_tmp_dir/$test_bundle_name.xctest"
 
 if [[ "$test_bundle_path" == *.xctest ]]; then
   cp -cRL "$test_bundle_path" "$test_tmp_dir"
-  chmod -R 777 "$test_bundle_dir"
+  chmod -R u+rwX "$test_bundle_dir"
 else
+  echo "note: staging test bundle from archive; building with" >&2
+  echo "note:   --@rules_apple//apple/build_settings:use_tree_artifacts_outputs" >&2
+  echo "note: stages with copy-on-write instead (see rules_idb README, Performance)" >&2
   unzip -qq -d "${test_tmp_dir}" "${test_bundle_path}"
 fi
 
@@ -188,13 +191,12 @@ if [[ -n "$test_host_path" ]]; then
 
   if [[ "$test_host_path" == *.app ]]; then
     cp -cRL "$test_host_path" "$test_tmp_dir"
-    chmod -R 777 "$test_tmp_dir/$test_host_name.app"
     test_host_dir="$test_tmp_dir/$test_host_name.app"
+    chmod -R u+rwX "$test_host_dir"
   else
     unzip -qq -d "${test_tmp_dir}" "${test_host_path}"
     mv "$test_tmp_dir"/Payload/*.app "$test_tmp_dir"
     test_host_dir=$(find "$test_tmp_dir" -name "*.app" -type d -maxdepth 1 -mindepth 1 -print -quit)
-    chmod -R 777 "$test_host_dir"
   fi
 fi
 

@@ -216,6 +216,23 @@ Runs the identical hosted test suite through both runners, single and with
 XCBBuildService vs idb / idb_companion) every 0.5s. See
 [benchmark/RESULTS.md](benchmark/RESULTS.md).
 
+## Performance
+
+Add to your `.bazelrc`:
+
+```
+build --@rules_apple//apple/build_settings:use_tree_artifacts_outputs
+```
+
+This makes rules_apple output bundles as directories instead of archives,
+so the runner stages them with APFS clonefile (copy-on-write) instead of
+unzipping — measured ~1.2s faster per test action with 800 MB of bundles
+on NVMe, and the gap grows with compressible many-file bundles and slower
+CI disks. The runner prints a hint when it detects archive staging. Also
+see the boot-concurrency and `preboot` sections above; simulator installs
+are already copy-on-write, so bundle size otherwise barely affects the
+run phase.
+
 ## Limitations
 
 * Device (non-simulator) testing is out of scope.

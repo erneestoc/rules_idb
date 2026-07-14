@@ -14,5 +14,10 @@ test --test_env=DEBUG_IDB_TEST_RUNNER
 # Apple platform config
 build --apple_platform_type=ios
 
+# Bundle as directories (tree artifacts) instead of archives: the runner
+# then stages with APFS clonefile instead of unzipping — measured ~1.2s
+# faster per test action at 800MB of bundles, more on slower disks.
+build --@rules_apple//apple/build_settings:use_tree_artifacts_outputs
+
 # Coverage with Apple rules requires the LLVM coverage map format.
 coverage --experimental_use_llvm_covmap

@@ -117,3 +117,9 @@ jobs:
             //examples:HostedTestsRandom //examples:HostedTestsHooks \
             --local_test_jobs=1 \
             --test_output=errors
+
+      - name: Behavioral validation of the runner
+        if: matrix.xcode == '26.2'
+        env:
+          RULES_IDB_COMPANION_DIST_URL: file://${{ github.workspace }}/idb-companion-dist.tar.gz
+        run: ./tests/validate.sh
