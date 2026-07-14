@@ -50,13 +50,6 @@ name, device_type, os_version = sys.argv[1], sys.argv[2], sys.argv[3]
 def simctl(*args):
     return subprocess.check_output(["xcrun", "simctl", *args], text=True)
 
-devices = json.loads(simctl("list", "devices", "-j"))["devices"]
-for runtime_devices in devices.values():
-    for device in runtime_devices:
-        if device["name"] == name and device.get("isAvailable", True):
-            print(device["udid"] + ":" + device.get("state", "Shutdown"))
-            sys.exit(0)
-
 runtimes = [
     r
     for r in json.loads(simctl("list", "runtimes", "-j"))["runtimes"]
@@ -96,6 +89,34 @@ if not device_type:
     if not iphones:
         sys.exit("error: no iPhone device types supported by runtime %s" % runtime["identifier"])
     device_type = max(iphones, key=model_key)["name"]
+
+# Expected device type identifier for verification below.
+all_device_types = json.loads(simctl("list", "devicetypes", "-j"))["devicetypes"]
+expected_dt = next(
+    (d["identifier"] for d in all_device_types if d["name"] == device_type or d["identifier"] == device_type),
+    None,
+)
+
+# Reuse an existing simulator only if its SUBSTANCE matches the resolved
+# intent (runtime + device type), not just its name: with default
+# device/os, "latest" drifts across Xcode upgrades and a stale simulator
+# would otherwise be reused forever.
+devices = json.loads(simctl("list", "devices", "-j"))["devices"]
+for runtime_id, runtime_devices in devices.items():
+    for device in runtime_devices:
+        if device["name"] != name:
+            continue
+        matches = (
+            device.get("isAvailable", True)
+            and runtime_id == runtime["identifier"]
+            and (expected_dt is None or device.get("deviceTypeIdentifier") == expected_dt)
+        )
+        if matches:
+            print(device["udid"] + ":" + device.get("state", "Shutdown"))
+            sys.exit(0)
+        subprocess.run(["xcrun", "simctl", "shutdown", device["udid"]], capture_output=True)
+        subprocess.run(["xcrun", "simctl", "delete", device["udid"]], capture_output=True)
+        print("note: recreated %s (device/runtime did not match request)" % name, file=sys.stderr)
 
 print(simctl("create", name, device_type, runtime["identifier"]).strip() + ":Created")
 PYEOF
