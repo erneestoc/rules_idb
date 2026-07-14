@@ -15,3 +15,6 @@ test --test_env=PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/s
 
 # Apple platform config
 build --apple_platform_type=ios
+
+# Coverage with Apple rules requires the LLVM coverage map format.
+coverage --experimental_use_llvm_covmap

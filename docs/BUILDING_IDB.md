@@ -35,6 +35,20 @@ builds internally with Buck; none of these paths are covered by their CI):
   renamed `public` Swift functions instead.
 * **`protoc_compiler_template.py`**: the python client's generated protoc
   plugin used `pkg_resources`, which no longer exists in modern setuptools.
+* **`InstallMethodHandler.swift`**: the handler created a new AsyncIterator
+  per read on the gRPC request stream, which grpc-swift's
+  `NIOThrowingAsyncSequenceProducer` forbids (fatal error on every install).
+* **`FBTestRunnerConfiguration.swift`**: adds the platform's
+  `Developer/usr/lib` to the test host's `DYLD_FALLBACK_LIBRARY_PATH` so
+  Swift test bundles can load `libXCTestSwiftSupport.dylib`; also plumbs a
+  `FB_XCTEST_EXECUTION_ORDERING=random` launch-env key into
+  `XCTestConfiguration.testExecutionOrdering`.
+* **`FBManagedTestRunStrategy.swift`**: request-provided `DYLD_*` variables
+  are appended to (not replacing) the composed launch values, so sanitizer
+  runtimes can ride along with the test shim.
+* **`FBTestManagerAPIMediator.swift`**: failing to terminate the app under
+  test during UI-test teardown (it usually already exited) no longer fails
+  the run.
 
 ## 2. Build the companion
 

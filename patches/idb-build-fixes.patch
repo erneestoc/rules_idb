@@ -321,8 +321,44 @@ index eb13025..73bcb45 100644
    }
  }
  
+diff --git a/XCTestBootstrap/Configuration/FBTestConfiguration.h b/XCTestBootstrap/Configuration/FBTestConfiguration.h
+index 7db7aa2..7df5eaf 100644
+--- a/XCTestBootstrap/Configuration/FBTestConfiguration.h
++++ b/XCTestBootstrap/Configuration/FBTestConfiguration.h
+@@ -31,7 +31,7 @@
+  @param error an error out for any error that occurs.
+  @return a test configuration after it has been written out to disk.
+  */
+-+ (nullable instancetype)configurationByWritingToFileWithSessionIdentifier:(nonnull NSUUID *)sessionIdentifier moduleName:(nonnull NSString *)moduleName testBundlePath:(nonnull NSString *)testBundlePath uiTesting:(BOOL)uiTesting testsToRun:(nullable NSSet<NSString *> *)testsToRun testsToSkip:(nullable NSSet<NSString *> *)testsToSkip targetApplicationPath:(nullable NSString *)targetApplicationPath targetApplicationBundleID:(nullable NSString *)targetApplicationBundleID testApplicationDependencies:(nullable NSDictionary<NSString *, NSString *> *)testApplicationDependencies automationFrameworkPath:(nullable NSString *)automationFrameworkPath reportActivities:(BOOL)reportActivities error:(NSError * _Nullable * _Nullable)error;
+++ (nullable instancetype)configurationByWritingToFileWithSessionIdentifier:(nonnull NSUUID *)sessionIdentifier moduleName:(nonnull NSString *)moduleName testBundlePath:(nonnull NSString *)testBundlePath uiTesting:(BOOL)uiTesting testsToRun:(nullable NSSet<NSString *> *)testsToRun testsToSkip:(nullable NSSet<NSString *> *)testsToSkip targetApplicationPath:(nullable NSString *)targetApplicationPath targetApplicationBundleID:(nullable NSString *)targetApplicationBundleID testApplicationDependencies:(nullable NSDictionary<NSString *, NSString *> *)testApplicationDependencies automationFrameworkPath:(nullable NSString *)automationFrameworkPath reportActivities:(BOOL)reportActivities testExecutionOrdering:(long long)testExecutionOrdering error:(NSError * _Nullable * _Nullable)error;
+ 
+ /**
+  Creates a Test Configuration.
+diff --git a/XCTestBootstrap/Configuration/FBTestConfiguration.m b/XCTestBootstrap/Configuration/FBTestConfiguration.m
+index 8b72a3f..1663e05 100644
+--- a/XCTestBootstrap/Configuration/FBTestConfiguration.m
++++ b/XCTestBootstrap/Configuration/FBTestConfiguration.m
+@@ -22,7 +22,7 @@
+ 
+ @implementation FBTestConfiguration
+ 
+-+ (nullable instancetype)configurationByWritingToFileWithSessionIdentifier:(NSUUID *)sessionIdentifier moduleName:(NSString *)moduleName testBundlePath:(NSString *)testBundlePath uiTesting:(BOOL)uiTesting testsToRun:(nullable NSSet<NSString *> *)testsToRun testsToSkip:(nullable NSSet<NSString *> *)testsToSkip targetApplicationPath:(nullable NSString *)targetApplicationPath targetApplicationBundleID:(nullable NSString *)targetApplicationBundleID testApplicationDependencies:(nullable NSDictionary<NSString *, NSString *> *)testApplicationDependencies automationFrameworkPath:(nullable NSString *)automationFrameworkPath reportActivities:(BOOL)reportActivities error:(NSError * _Nullable * _Nullable)error
+++ (nullable instancetype)configurationByWritingToFileWithSessionIdentifier:(NSUUID *)sessionIdentifier moduleName:(NSString *)moduleName testBundlePath:(NSString *)testBundlePath uiTesting:(BOOL)uiTesting testsToRun:(nullable NSSet<NSString *> *)testsToRun testsToSkip:(nullable NSSet<NSString *> *)testsToSkip targetApplicationPath:(nullable NSString *)targetApplicationPath targetApplicationBundleID:(nullable NSString *)targetApplicationBundleID testApplicationDependencies:(nullable NSDictionary<NSString *, NSString *> *)testApplicationDependencies automationFrameworkPath:(nullable NSString *)automationFrameworkPath reportActivities:(BOOL)reportActivities testExecutionOrdering:(long long)testExecutionOrdering error:(NSError * _Nullable * _Nullable)error
+ {
+   // Construct the XCTestConfiguration class.
+   XCTestConfiguration *testConfiguration = [objc_lookUpClass("XCTestConfiguration") new];
+@@ -39,6 +39,9 @@ + (nullable instancetype)configurationByWritingToFileWithSessionIdentifier:(NSUU
+   testConfiguration.automationFrameworkPath = automationFrameworkPath;
+   testConfiguration.reportActivities = reportActivities;
+   testConfiguration.testsDrivenByIDE = NO;
++  // 0 = default (lexical) ordering, 1 = random. Same values as the
++  // TestExecutionOrdering key in an .xctestrun file.
++  testConfiguration.testExecutionOrdering = testExecutionOrdering;
+   testConfiguration.testApplicationDependencies = testApplicationDependencies;
+ 
+   XCTCapabilitiesBuilder *capabilitiesBuilder = [objc_lookUpClass("XCTCapabilitiesBuilder") new];
 diff --git a/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift b/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
-index d1f393f..99ebd25 100644
+index d1f393f..ee09d18 100644
 --- a/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
 +++ b/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
 @@ -110,6 +110,11 @@ public class FBTestRunnerConfiguration: NSObject, NSCopying {
@@ -337,6 +373,59 @@ index d1f393f..99ebd25 100644
      ]
  
      let automationFrameworkPath = (developerLibraryPath as NSString).appendingPathComponent("PrivateFrameworks/XCTAutomationSupport.framework")
+@@ -158,7 +163,10 @@ public class FBTestRunnerConfiguration: NSObject, NSCopying {
+         targetApplicationBundleID: testLaunchConfiguration.targetApplicationBundle?.identifier,
+         testApplicationDependencies: testApplicationDependencies,
+         automationFrameworkPath: automationFrameworkPathOrNil,
+-        reportActivities: testLaunchConfiguration.reportActivities
++        reportActivities: testLaunchConfiguration.reportActivities,
++        // Requested through the launch environment so that clients can opt
++        // into random ordering without a protocol change.
++        testExecutionOrdering: testLaunchConfiguration.applicationLaunchConfiguration.environment["FB_XCTEST_EXECUTION_ORDERING"] == "random" ? 1 : 0
+       )
+     } catch {
+       return unsafeBitCast(
+diff --git a/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift b/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift
+index 9494cd3..c9cf7a6 100644
+--- a/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift
++++ b/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift
+@@ -85,7 +85,15 @@ import Foundation
+   private static func environment(fromConfiguration configuration: FBTestRunnerConfiguration, environment: [String: String]) -> [String: String] {
+     var mEnvironment = configuration.launchEnvironment
+     for (key, value) in environment {
+-      mEnvironment[key] = value
++      // The launch environment already carries the DYLD path variables that
++      // test bootstrapping depends on (e.g. the shim in
++      // DYLD_INSERT_LIBRARIES); requests may extend them (sanitizer
++      // runtimes, extra search paths) but must not replace them.
++      if key.hasPrefix("DYLD_"), let existing = mEnvironment[key], !existing.isEmpty, !value.isEmpty {
++        mEnvironment[key] = existing + ":" + value
++      } else {
++        mEnvironment[key] = value
++      }
+     }
+     return mEnvironment
+   }
+diff --git a/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift b/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift
+index 860ec5e..1c2a773 100644
+--- a/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift
++++ b/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift
+@@ -178,7 +178,14 @@ public final class FBTestManagerAPIMediator: NSObject, @unchecked Sendable {
+     }
+     logger.log("Terminating processes spawned due to test bundle requests: \(appsToKill.map(\.bundleID))")
+     for app in appsToKill {
+-      try await asyncTarget.killApplication(bundleID: app.bundleID)
++      do {
++        try await asyncTarget.killApplication(bundleID: app.bundleID)
++      } catch {
++        // The app may already have exited (e.g. the test terminated it, or
++        // it quit when the session ended); failing to kill it during
++        // teardown must not fail an otherwise-successful test run.
++        logger.log("Ignoring failure to terminate \(app.bundleID) during teardown: \(error)")
++      }
+     }
+   }
+ 
 diff --git a/protoc_compiler_template.py b/protoc_compiler_template.py
 index 5d9522b..75f8d6e 100755
 --- a/protoc_compiler_template.py

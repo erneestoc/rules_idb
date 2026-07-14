@@ -65,6 +65,26 @@ Or use the predefined `@rules_idb//idb:default_runner`.
   `XML_OUTPUT_FILE` for Bazel, honors `--test_filter`
   (`Class/testMethod,-Class/testToSkip`), forwards `--test_env` variables
   into the hosted process, and fails when zero tests ran.
+* **UI tests.** `ios_ui_test` targets work: the runner assembles an
+  XCTRunner host app from Xcode's agent template and drives it through
+  `idb xctest run ui`.
+* **Coverage.** `bazel coverage` produces standard lcov output (idb pulls
+  the raw `.profraw` files; the runner merges and exports them with
+  `llvm-cov`, same as the stock runner). Requires
+  `coverage --experimental_use_llvm_covmap` in your `.bazelrc`.
+* **Random test ordering** via `random = True`
+  (XCTestConfiguration.testExecutionOrdering, like `-test-iterations`' era
+  xctestrun key; requires a test host).
+* **Sanitizers.** `--features=asan` (and friends) work: sanitizer runtimes
+  found in the test bundle are appended to the test host's
+  `DYLD_INSERT_LIBRARIES` alongside idb's test shim.
+* **`pre_action` / `post_action` hooks** with the same environment contract
+  as the stock runner (`SIMULATOR_UDID`, `TEST_EXIT_CODE`, `TEST_LOG_FILE`,
+  and `post_action_determines_exit_code`).
+* **Pluggable simulator provisioning.** Teams with an existing
+  `simulator_creator` can plug it in unchanged via
+  `create_simulator_action` / `clean_up_simulator_action` (same env
+  contract as rules_apple); the built-in pool remains the default.
 
 ## Requirements
 
@@ -94,8 +114,12 @@ test action's `PATH`, set the `idb_path` attribute, or pass
 | `device_type` | newest iPhone | `xcrun simctl list devicetypes` name |
 | `os_version` | newest iOS | `xcrun simctl list runtimes` version |
 | `pool_size` | `0` (on demand) | max simulators per (device, OS) pool |
+| `random` | `False` | run tests in random order (requires test host) |
 | `shutdown_simulator_after_test` | `False` | shut simulator down after each test |
 | `idb_path` | `idb` | path to the idb client |
+| `pre_action` / `post_action` | none | hook binaries around test execution |
+| `post_action_determines_exit_code` | `False` | post_action exit code wins |
+| `create_simulator_action` / `clean_up_simulator_action` | built-in pool | custom simulator provisioning binaries |
 
 Runtime environment overrides: `RULES_IDB_IDB_PATH`,
 `RULES_IDB_COMPANION_PATH`, `RULES_IDB_POOL_DIR`, `RULES_IDB_POOL_SIZE`,
@@ -144,11 +168,7 @@ XCBBuildService vs idb / idb_companion) every 0.5s. See
 
 ## Limitations
 
-* UI tests (`ios_ui_test`) are not supported yet; the runner fails fast and
-  tells you to use the stock runner. (idb supports `xctest run ui`, so this
-  is implementable.)
-* Coverage (`bazel coverage`) is not wired up yet. idb exposes
-  `--coverage-output-path`, so this is also implementable.
 * Device (non-simulator) testing is out of scope.
 * xcresult bundles are not produced; the runner emits JUnit XML and idb log
   output instead.
+* x86_64 test bundles on arm64 hosts (Rosetta) are untested.

@@ -3,8 +3,9 @@ Facebook's idb (https://github.com/facebook/idb) instead of xcodebuild.
 
 Compared to the default rules_apple runners this runner:
 
-* Uses `idb` + `idb_companion` to install and run hosted tests, which uses
-  far less memory than `xcodebuild test-without-building`.
+* Uses `idb` + `idb_companion` to install and run hosted, logic, and UI
+  tests, which uses far less memory than `xcodebuild
+  test-without-building`.
 * Supports `--local_test_jobs=N` out of the box: each concurrently running
   test acquires its own simulator from a pool guarded by kernel `flock`
   locks. Locks are tied to the runner process lifetime, so they are released
@@ -17,21 +18,65 @@ load(
     "apple_provider",
 )
 
-def _get_template_substitutions(ctx):
+def _get_template_substitutions(ctx, *, create_simulator_action_binary, clean_up_simulator_action_binary, pre_action_binary, post_action_binary, post_action_determines_exit_code):
     substitutions = {
         "device_type": ctx.attr.device_type,
         "os_version": ctx.attr.os_version,
         "pool_size": str(ctx.attr.pool_size),
         "shutdown_after_test": "true" if ctx.attr.shutdown_simulator_after_test else "false",
         "idb_path": ctx.attr.idb_path,
+        "random": "true" if ctx.attr.random else "false",
+        "create_simulator_action_binary": create_simulator_action_binary,
+        "clean_up_simulator_action_binary": clean_up_simulator_action_binary,
+        "pre_action_binary": pre_action_binary,
+        "post_action_binary": post_action_binary,
+        "post_action_determines_exit_code": "true" if post_action_determines_exit_code else "false",
     }
     return {"%({})s".format(key): value for key, value in substitutions.items()}
 
 def _ios_idb_test_runner_impl(ctx):
+    runfiles = ctx.runfiles()
+
+    default_action_binary = "/usr/bin/true"
+
+    pre_action_binary = default_action_binary
+    if ctx.executable.pre_action:
+        pre_action_binary = ctx.executable.pre_action.short_path
+        runfiles = runfiles.merge(ctx.attr.pre_action[DefaultInfo].default_runfiles)
+        runfiles = runfiles.merge(ctx.runfiles(files = [ctx.executable.pre_action]))
+
+    post_action_binary = default_action_binary
+    post_action_determines_exit_code = False
+    if ctx.executable.post_action:
+        post_action_binary = ctx.executable.post_action.short_path
+        post_action_determines_exit_code = ctx.attr.post_action_determines_exit_code
+        runfiles = runfiles.merge(ctx.attr.post_action[DefaultInfo].default_runfiles)
+        runfiles = runfiles.merge(ctx.runfiles(files = [ctx.executable.post_action]))
+
+    # Empty string selects the built-in flock-based simulator pool.
+    create_simulator_action_binary = ""
+    if ctx.executable.create_simulator_action:
+        create_simulator_action_binary = ctx.executable.create_simulator_action.short_path
+        runfiles = runfiles.merge(ctx.attr.create_simulator_action[DefaultInfo].default_runfiles)
+        runfiles = runfiles.merge(ctx.runfiles(files = [ctx.executable.create_simulator_action]))
+
+    clean_up_simulator_action_binary = ""
+    if ctx.executable.clean_up_simulator_action:
+        clean_up_simulator_action_binary = ctx.executable.clean_up_simulator_action.short_path
+        runfiles = runfiles.merge(ctx.attr.clean_up_simulator_action[DefaultInfo].default_runfiles)
+        runfiles = runfiles.merge(ctx.runfiles(files = [ctx.executable.clean_up_simulator_action]))
+
     ctx.actions.expand_template(
         template = ctx.file._test_template,
         output = ctx.outputs.test_runner_template,
-        substitutions = _get_template_substitutions(ctx),
+        substitutions = _get_template_substitutions(
+            ctx,
+            create_simulator_action_binary = create_simulator_action_binary,
+            clean_up_simulator_action_binary = clean_up_simulator_action_binary,
+            pre_action_binary = pre_action_binary,
+            post_action_binary = post_action_binary,
+            post_action_determines_exit_code = post_action_determines_exit_code,
+        ),
     )
 
     return [
@@ -43,7 +88,7 @@ def _ios_idb_test_runner_impl(ctx):
             device_type = ctx.attr.device_type,
             os_version = ctx.attr.os_version,
         ),
-        DefaultInfo(),
+        DefaultInfo(runfiles = runfiles),
     ]
 
 ios_idb_test_runner = rule(
@@ -72,6 +117,14 @@ Maximum number of pooled simulators per (device_type, os_version)
 combination. `0` (the default) lets the pool grow on demand; effective
 concurrency is then bounded by Bazel's `--local_test_jobs`. Can be
 overridden at test time with the `RULES_IDB_POOL_SIZE` environment variable.
+Ignored when a custom `create_simulator_action` is provided.
+""",
+        ),
+        "random": attr.bool(
+            default = False,
+            doc = """
+Whether to run the tests in random order to identify unintended state
+dependencies. Requires a test host (hosted or UI tests).
 """,
         ),
         "shutdown_simulator_after_test": attr.bool(
@@ -86,10 +139,62 @@ footprint.
         "idb_path": attr.string(
             default = "idb",
             doc = """
-Path to the `idb` client binary (from the `fb-idb` pip package). Defaults to
-finding `idb` on `PATH`. `idb_companion` must also be discoverable on `PATH`
-(`brew install facebook/fb/idb-companion`). Can be overridden at test time
-with the `RULES_IDB_IDB_PATH` environment variable.
+Path to the `idb` client binary. Defaults to finding `idb` on `PATH`.
+`idb_companion` must also be discoverable on `PATH` or through the
+`RULES_IDB_COMPANION_PATH` environment variable. See docs/BUILDING_IDB.md;
+both must currently be built from facebook/idb main. Can be overridden at
+test time with the `RULES_IDB_IDB_PATH` environment variable.
+""",
+        ),
+        "create_simulator_action": attr.label(
+            cfg = "exec",
+            executable = True,
+            doc = """
+Optional binary that produces the UDID of a simulator to run the tests on,
+replacing the built-in flock-based simulator pool. The binary must print
+only the UDID to stdout. It receives the same environment contract as
+rules_apple's `ios_xctestrun_runner`: `SIMULATOR_DEVICE_TYPE`,
+`SIMULATOR_OS_VERSION`, and `SIMULATOR_REUSE_SIMULATOR` (always "1" unless
+`shutdown_simulator_after_test` is set). Teams with an existing custom
+`simulator_creator` can plug it in here unchanged; most users should prefer
+the built-in pool, which already provides concurrency-safe simulator
+acquisition.
+""",
+        ),
+        "clean_up_simulator_action": attr.label(
+            cfg = "exec",
+            executable = True,
+            doc = """
+Optional binary that cleans up the simulator produced by
+`create_simulator_action`. Runs after the `post_action`, regardless of test
+outcome, with `SIMULATOR_UDID` and `SIMULATOR_REUSE_SIMULATOR` set. Only
+used when `create_simulator_action` is also set.
+""",
+        ),
+        "pre_action": attr.label(
+            cfg = "exec",
+            executable = True,
+            doc = """
+A binary to run prior to test execution, after simulator acquisition. Sets
+the `$SIMULATOR_UDID` environment variable, in addition to any other
+variables available to the test runner.
+""",
+        ),
+        "post_action": attr.label(
+            cfg = "exec",
+            executable = True,
+            doc = """
+A binary to run following test execution, before test result handling. Sets
+`$TEST_EXIT_CODE`, `$TEST_LOG_FILE`, and `$SIMULATOR_UDID`, in addition to
+any other variables available to the test runner.
+""",
+        ),
+        "post_action_determines_exit_code": attr.bool(
+            default = False,
+            doc = """
+When true, the exit code of the test run is the exit code of the
+`post_action`. Useful for tests that need to fail based on their own
+criteria.
 """,
         ),
         "_test_template": attr.label(
@@ -101,8 +206,8 @@ with the `RULES_IDB_IDB_PATH` environment variable.
         "test_runner_template": "%{name}.sh",
     },
     doc = """
-Creates a test runner for `ios_unit_test` targets that executes tests with
-Facebook's idb instead of xcodebuild.
+Creates a test runner for `ios_unit_test` and `ios_ui_test` targets that
+executes tests with Facebook's idb instead of xcodebuild.
 
 Example:
 

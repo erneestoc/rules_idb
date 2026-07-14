@@ -1,4 +1,5 @@
-load("@rules_apple//apple:ios.bzl", "ios_application", "ios_unit_test")
+load("@rules_apple//apple:ios.bzl", "ios_application", "ios_ui_test", "ios_unit_test")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_swift//swift:swift.bzl", "swift_library")
 load("@rules_idb//idb:idb_test_runner.bzl", "ios_idb_test_runner")
 
@@ -112,3 +113,119 @@ ios_unit_test(
     )
     for i in range(1, 5)
 ]
+
+# --- Feature demonstration targets -----------------------------------------
+
+swift_library(
+    name = "UITestsLib",
+    testonly = True,
+    srcs = ["Tests/UITests.swift"],
+    module_name = "UITests",
+)
+
+# UI tests run through `idb xctest run ui` with an XCTRunner host the runner
+# assembles from Xcode's agent template.
+ios_ui_test(
+    name = "UITests",
+    size = "large",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    test_host = ":HostApp",
+    deps = [":UITestsLib"],
+)
+
+# Random test ordering (XCTestConfiguration.testExecutionOrdering).
+ios_idb_test_runner(
+    name = "idb_random_runner",
+    device_type = "iPhone 17 Pro",
+    random = True,
+)
+
+ios_unit_test(
+    name = "HostedTestsRandom",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_random_runner",
+    test_host = ":HostApp",
+    deps = [":HostedTestsLib"],
+)
+
+# pre_action / post_action hooks.
+sh_binary(
+    name = "pre_action",
+    srcs = ["hooks/pre_action.sh"],
+)
+
+sh_binary(
+    name = "post_action",
+    srcs = ["hooks/post_action.sh"],
+)
+
+ios_idb_test_runner(
+    name = "idb_hooks_runner",
+    device_type = "iPhone 17 Pro",
+    post_action = ":post_action",
+    pre_action = ":pre_action",
+)
+
+ios_unit_test(
+    name = "HostedTestsHooks",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_hooks_runner",
+    test_host = ":HostApp",
+    deps = [":HostedTestsLib"],
+)
+
+# Custom simulator provisioning (rules_apple ios_xctestrun_runner contract),
+# replacing the built-in pool.
+sh_binary(
+    name = "custom_simulator_creator",
+    srcs = ["hooks/custom_simulator_creator.sh"],
+)
+
+sh_binary(
+    name = "custom_simulator_cleanup",
+    srcs = ["hooks/custom_simulator_cleanup.sh"],
+)
+
+ios_idb_test_runner(
+    name = "idb_custom_sim_runner",
+    clean_up_simulator_action = ":custom_simulator_cleanup",
+    create_simulator_action = ":custom_simulator_creator",
+    device_type = "iPhone 17 Pro",
+)
+
+ios_unit_test(
+    name = "HostedTestsCustomSim",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_custom_sim_runner",
+    test_host = ":HostApp",
+    deps = [":HostedTestsLib"],
+)
+
+# post_action_determines_exit_code: the post action fails (exit 7) even
+# though the tests pass, so the target must FAIL. Tagged manual; used by the
+# runner's own validation.
+sh_binary(
+    name = "failing_post_action",
+    srcs = ["hooks/failing_post_action.sh"],
+)
+
+ios_idb_test_runner(
+    name = "idb_post_gate_runner",
+    device_type = "iPhone 17 Pro",
+    post_action = ":failing_post_action",
+    post_action_determines_exit_code = True,
+)
+
+ios_unit_test(
+    name = "HostedTestsPostGate",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_post_gate_runner",
+    tags = ["manual"],
+    test_host = ":HostApp",
+    deps = [":HostedTestsLib"],
+)
