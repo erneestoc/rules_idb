@@ -12,6 +12,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A release must never ship from an unvalidated commit.
+      - name: Wait for CI to pass on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in $(seq 1 120); do
+            status=$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --workflow CI --json status,conclusion --jq '.[0].status + "/" + (.[0].conclusion // "")')
+            case "$status" in
+              completed/success) echo "CI green"; exit 0 ;;
+              completed/*) echo "CI failed: $status"; exit 1 ;;
+              *) echo "waiting for CI ($status)"; sleep 30 ;;
+            esac
+          done
+          echo "timed out waiting for CI"; exit 1
+
       - name: Create deterministic source archive
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
