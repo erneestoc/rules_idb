@@ -23,7 +23,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: idb-companion-dist.tar.gz
-          key: companion-${{ env.IDB_COMMIT }}-${{ hashFiles('patches/idb-build-fixes.patch') }}-v1
+          key: companion-${{ env.IDB_COMMIT }}-${{ hashFiles('patches/idb-build-fixes.patch') }}-v2
 
       - name: Select Xcode
         if: steps.cache.outputs.cache-hit != 'true'
@@ -39,7 +39,10 @@ jobs:
           cd idb-src
           git checkout "$IDB_COMMIT"
           git apply "$GITHUB_WORKSPACE/patches/idb-build-fixes.patch"
-          ./build.sh build shims
+          # Only what the test runner needs: the Repl shims (idb's REPL
+          # feature, unused here) fail to build on newer toolchains.
+          ./build.sh build Shimulator-iOS
+          ./build.sh build Shimulator-macOS
           ./build.sh build SimulatorFrameworkBridge
           ./build.sh build idb_companion
           R=Build/Products/Release
@@ -49,7 +52,6 @@ jobs:
           cp "$R/idb_companion" "$D/"
           for b in "$R"/*.bundle; do [ -e "$b" ] && ditto "$b" "$D/$(basename "$b")"; done
           cp "$S/libShimulator-iOS.dylib" "$R/libShimulator-macOS.dylib" \
-             "$S/libRepl-iOS.dylib" "$R/libRepl-macOS.dylib" \
              "$S/SimulatorFrameworkBridge" "$D/Resources/"
           tar -czf "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz" -C "$D" .
 
