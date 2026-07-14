@@ -5,21 +5,99 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # facebook/idb revision the companion is built from; must match
+  # docs/BUILDING_IDB.md and the build-idb-dist workflow default.
+  IDB_COMMIT: 70d75b32ada839d85a860029e4c9da0224fe57eb
+
 jobs:
-  test:
-    runs-on: macos-15
-    timeout-minutes: 60
+  # Build the companion from the CURRENT commit's pin + patches (not from a
+  # release), cached on (idb commit, patch contents).
+  build-companion:
+    runs-on: macos-26
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: idb-companion-dist.tar.gz
+          key: companion-${{ env.IDB_COMMIT }}-${{ hashFiles('patches/idb-build-fixes.patch') }}-v1
+
       - name: Select Xcode
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | grep -v beta | sort -V | tail -1)"
+          xcodebuild -version
 
-      - name: Build everything
-        run: bazelisk build //idb/... //examples:HostedTests //examples:LogicTests //examples:UITests
+      - name: Build companion from pinned commit + patches
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          brew install xcodegen protobuf swift-protobuf
+          git clone https://github.com/facebook/idb.git idb-src
+          cd idb-src
+          git checkout "$IDB_COMMIT"
+          git apply "$GITHUB_WORKSPACE/patches/idb-build-fixes.patch"
+          ./build.sh build shims
+          ./build.sh build SimulatorFrameworkBridge
+          ./build.sh build idb_companion
+          R=Build/Products/Release
+          S=Build/Products/Release-iphonesimulator
+          D="$GITHUB_WORKSPACE/idb-dist"
+          mkdir -p "$D/Resources"
+          cp "$R/idb_companion" "$D/"
+          for b in "$R"/*.bundle; do [ -e "$b" ] && ditto "$b" "$D/$(basename "$b")"; done
+          cp "$S/libShimulator-iOS.dylib" "$R/libShimulator-macOS.dylib" \
+             "$S/libRepl-iOS.dylib" "$R/libRepl-macOS.dylib" \
+             "$S/SimulatorFrameworkBridge" "$D/Resources/"
+          tar -czf "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz" -C "$D" .
 
-      - name: Run logic tests on a simulator
-        run: bazelisk test //examples:LogicTests --test_output=all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: companion-dist
+          path: idb-companion-dist.tar.gz
 
-      - name: Run hosted tests on a simulator
-        run: bazelisk test //examples:HostedTests --test_output=all
+  test:
+    needs: build-companion
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - xcode: "26.2"
+            required: true
+          - xcode: "26.4.1"
+            required: true
+          - xcode: "26.5"
+            required: true
+          - xcode: "27" # beta: informational only
+            required: false
+    runs-on: macos-26
+    timeout-minutes: 60
+    continue-on-error: ${{ !matrix.required }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: companion-dist
+
+      - name: Select Xcode ${{ matrix.xcode }}
+        run: |
+          match=$(ls -d "/Applications/Xcode_${{ matrix.xcode }}"*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [[ -z "$match" ]]; then
+            echo "::error::Xcode ${{ matrix.xcode }} not on this image. Available:"
+            ls -d /Applications/Xcode_*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$match"
+          xcodebuild -version
+
+      - name: Run example test suite
+        env:
+          RULES_IDB_COMPANION_DIST_URL: file://${{ github.workspace }}/idb-companion-dist.tar.gz
+        run: |
+          bazelisk test \
+            //examples:LogicTests //examples:HostedTests //examples:UITests \
+            //examples:HostedTestsRandom //examples:HostedTestsHooks \
+            --test_output=errors

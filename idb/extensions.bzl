@@ -24,13 +24,18 @@ filegroup(
 exports_files(["idb_companion"])
 """
 
-def _idb_impl(_module_ctx):
+def _idb_impl(module_ctx):
+    # CI (and local development) can bypass the released artifact and use a
+    # companion distribution built from the current commit's pinned idb
+    # revision + patches, e.g. RULES_IDB_COMPANION_DIST_URL=file:///path/to/dist.tar.gz
+    override_url = module_ctx.getenv("RULES_IDB_COMPANION_DIST_URL")
+    override_sha = module_ctx.getenv("RULES_IDB_COMPANION_DIST_SHA256")
     http_archive(
         name = "idb_companion_dist",
         urls = [
-            "https://github.com/erneestoc/rules_idb/releases/download/{}/idb-companion-dist.tar.gz".format(COMPANION_RELEASE),
+            override_url or "https://github.com/erneestoc/rules_idb/releases/download/{}/idb-companion-dist.tar.gz".format(COMPANION_RELEASE),
         ],
-        sha256 = COMPANION_SHA256,
+        sha256 = override_sha or ("" if override_url else COMPANION_SHA256),
         build_file_content = _COMPANION_BUILD,
     )
 

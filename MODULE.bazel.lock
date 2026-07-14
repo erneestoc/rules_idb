@@ -204,19 +204,21 @@
   "moduleExtensions": {
     "//idb:extensions.bzl%idb": {
       "general": {
-        "bzlTransitiveDigest": "9b4rRNDBsWseAa3x7QYIOjFNYBPLhe7gPHFyK0tEfIg=",
-        "usagesDigest": "STJ4UV+b0gWA1Y58Di8vkG6ezSZnnFBUCuP9Y7VjPAk=",
+        "bzlTransitiveDigest": "RWcwtcJHlhCopv8lgSEv0wP0tEWnAsGE4OpGF1IWTQQ=",
+        "usagesDigest": "XBSmyoxsKgvYSEG/+8a35MKQI0jQgxuMFCKRl5Hzb10=",
         "recordedInputs": [
-          "REPO_MAPPING:,bazel_tools bazel_tools"
+          "REPO_MAPPING:,bazel_tools bazel_tools",
+          "ENV:RULES_IDB_COMPANION_DIST_URL file:///private/tmp/claude-501/-Users-ernesto-workspace-rules-apple/202d0c70-851a-4158-a8f6-08e234c4c6e0/scratchpad/idb-companion-dist.tar.gz",
+          "ENV:RULES_IDB_COMPANION_DIST_SHA256 \\0"
         ],
         "generatedRepoSpecs": {
           "idb_companion_dist": {
             "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
             "attributes": {
               "urls": [
-                "https://github.com/erneestoc/rules_idb/releases/download/v0.1.1/idb-companion-dist.tar.gz"
+                "file:///private/tmp/claude-501/-Users-ernesto-workspace-rules-apple/202d0c70-851a-4158-a8f6-08e234c4c6e0/scratchpad/idb-companion-dist.tar.gz"
               ],
-              "sha256": "b647e14d79f51cb0bffdf433599536a84c1155f48d4deb92525320e713a5fa09",
+              "sha256": "",
               "build_file_content": "\npackage(default_visibility = [\"//visibility:public\"])\n\nfilegroup(\n    name = \"dist\",\n    srcs = glob([\"**\"]),\n)\n\nexports_files([\"idb_companion\"])\n"
             }
           }
