@@ -124,7 +124,7 @@ the bundled binaries.
 | --- | --- | --- |
 | `device_type` | newest iPhone | `xcrun simctl list devicetypes` name |
 | `os_version` | newest iOS | `xcrun simctl list runtimes` version |
-| `pool_size` | `0` = capped at 4 | max simulators per (device, OS) pool (each booted sim ≈ 60-100 processes) |
+| `pool_size` | `0` (on demand) | max simulators per pool; concurrency already bounded by `--local_test_jobs`. Idle residue bounded by `RULES_IDB_WARM_POOL_SIZE` (default 4 stay booted; each ≈ 60-100 processes) |
 | `max_concurrent_boots` | `0` = auto (ncpu/2) | machine-wide cap on simultaneous simulator creates/boots |
 | `random` | `False` | run tests in random order (requires test host) |
 | `shutdown_simulator_after_test` | `False` | shut simulator down after each test |

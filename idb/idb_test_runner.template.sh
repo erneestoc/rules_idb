@@ -31,13 +31,12 @@ fi
 device_type="%(device_type)s"
 os_version="%(os_version)s"
 pool_size="${RULES_IDB_POOL_SIZE:-%(pool_size)s}"
-if [[ "$pool_size" -le 0 ]]; then
-  # Default cap: each booted simulator keeps ~60-100 CoreSimulator
-  # processes alive (that is the warm-pool trade); an uncapped pool on a
-  # many-core machine without --local_test_jobs can exhaust the process
-  # table. Above the cap, actions wait for a free slot.
-  pool_size=4
-fi
+# Concurrency is naturally bounded by --local_test_jobs (one slot per
+# running action); what must be bounded separately is the idle residue:
+# each simulator left booted keeps ~60-100 CoreSimulator processes alive.
+# After a test, only the first N slots stay warm; higher slots shut their
+# simulator down.
+warm_pool_size="${RULES_IDB_WARM_POOL_SIZE:-4}"
 max_concurrent_boots="${RULES_IDB_MAX_CONCURRENT_BOOTS:-%(max_concurrent_boots)s}"
 if [[ "$max_concurrent_boots" -le 0 ]]; then
   # Auto: half the CPU cores. Parallel boots win on strong hardware
@@ -864,6 +863,9 @@ if [[ -n "$clean_up_simulator_action_binary" ]]; then
   SIMULATOR_UDID="$simulator_id" SIMULATOR_REUSE_SIMULATOR="${reuse_simulator:-}" \
     "$clean_up_simulator_action_binary" || true
 elif [[ "$shutdown_after_test" == true || -n "${RULES_IDB_SHUTDOWN_SIMULATOR:-}" ]]; then
+  xcrun simctl shutdown "$simulator_id" >&2 || true
+elif [[ -n "${acquired_slot:-}" && "$acquired_slot" -ge "$warm_pool_size" ]]; then
+  echo "note: slot $acquired_slot >= warm pool size $warm_pool_size; shutting simulator down" >&2
   xcrun simctl shutdown "$simulator_id" >&2 || true
 fi
 
