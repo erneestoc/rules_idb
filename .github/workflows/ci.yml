@@ -98,6 +98,14 @@ jobs:
           sudo xcode-select -s "$match"
           xcodebuild -version
 
+      # Hosted runners are small VMs with very slow first simulator boots;
+      # boot one pool simulator up front (no test timeout applies here) and
+      # run the suite serialized against it, warm.
+      - name: Pre-boot simulator
+        env:
+          RULES_IDB_COMPANION_DIST_URL: file://${{ github.workspace }}/idb-companion-dist.tar.gz
+        run: bazelisk run //tools:preboot -- 1 --device "iPhone 17 Pro"
+
       - name: Run example test suite
         env:
           RULES_IDB_COMPANION_DIST_URL: file://${{ github.workspace }}/idb-companion-dist.tar.gz
@@ -105,4 +113,5 @@ jobs:
           bazelisk test \
             //examples:LogicTests //examples:HostedTests //examples:UITests \
             //examples:HostedTestsRandom //examples:HostedTestsHooks \
+            --local_test_jobs=1 \
             --test_output=errors
