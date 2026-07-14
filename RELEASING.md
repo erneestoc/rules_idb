@@ -18,13 +18,15 @@ them:
      copy `idb/` into `third_party/idb_client/`, regenerate
      `idb_pb2.py`/`idb_grpc.py`, keep the `python/migrations` shim.
    - Run the full example suite and the benchmark.
-2. Tag and create the GitHub release:
-   `git tag vX.Y.Z && git push --tags && gh release create vX.Y.Z --notes "..."`.
-3. Build and attach the companion artifact: run the **Build idb companion
-   distribution** workflow with the pinned commit and the release tag (or
-   build locally and `gh release upload`).
-4. Update `idb/extensions.bzl` (`COMPANION_RELEASE`, `COMPANION_SHA256`)
-   to the new artifact and land that commit.
+2. Tag and create the GitHub release **with the companion artifact
+   attached** before landing any commit that references it — CI fetches the
+   artifact URL, so a commit pointing `extensions.bzl` at a release that
+   doesn't exist yet breaks every build in the gap:
+   `git tag vX.Y.Z && git push --tags && gh release create vX.Y.Z <artifact> --notes "..."`
+   (or run the **Build idb companion distribution** workflow with the
+   pinned commit and the release tag).
+3. Only then update `idb/extensions.bzl` (`COMPANION_RELEASE`,
+   `COMPANION_SHA256`) and land that commit.
 
 ## Release notes template
 
