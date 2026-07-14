@@ -31,6 +31,13 @@ fi
 device_type="%(device_type)s"
 os_version="%(os_version)s"
 pool_size="${RULES_IDB_POOL_SIZE:-%(pool_size)s}"
+if [[ "$pool_size" -le 0 ]]; then
+  # Default cap: each booted simulator keeps ~60-100 CoreSimulator
+  # processes alive (that is the warm-pool trade); an uncapped pool on a
+  # many-core machine without --local_test_jobs can exhaust the process
+  # table. Above the cap, actions wait for a free slot.
+  pool_size=4
+fi
 max_concurrent_boots="${RULES_IDB_MAX_CONCURRENT_BOOTS:-%(max_concurrent_boots)s}"
 if [[ "$max_concurrent_boots" -le 0 ]]; then
   # Auto: half the CPU cores. Parallel boots win on strong hardware
@@ -149,6 +156,12 @@ companion_sock_dir=""
 cleanup() {
   if [[ -n "$companion_pid" ]]; then
     kill "$companion_pid" 2>/dev/null || true
+    # The companion's gRPC server can ignore SIGTERM; make sure it dies.
+    for _ in 1 2 3 4 5; do
+      kill -0 "$companion_pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill -9 "$companion_pid" 2>/dev/null || true
   fi
   if [[ -n "$companion_sock_dir" ]]; then
     rm -rf "$companion_sock_dir"

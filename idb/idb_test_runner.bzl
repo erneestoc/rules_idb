@@ -161,8 +161,11 @@ a low explicit cap. Can be overridden at test time with the
             default = 0,
             doc = """
 Maximum number of pooled simulators per (device_type, os_version)
-combination. `0` (the default) lets the pool grow on demand; effective
-concurrency is then bounded by Bazel's `--local_test_jobs`. Can be
+combination. `0` (the default) caps the pool at 4: each booted simulator
+keeps roughly 60-100 CoreSimulator processes alive, so an unbounded pool
+on a many-core machine (or with --runs_per_test) can exhaust the process
+table. Actions beyond the cap wait for a free slot; raise this (and use
+--local_test_jobs) on machines meant to run wider. Can be
 overridden at test time with the `RULES_IDB_POOL_SIZE` environment variable.
 Ignored when a custom `create_simulator_action` is provided.
 """,
@@ -255,7 +258,7 @@ criteria.
         "_python": attr.label(
             allow_single_file = True,
             cfg = "exec",
-            default = Label("@python_3_12_host//:python"),
+            default = Label("//idb:client_python"),
             doc = """
 Hermetic python interpreter used to run the bundled client, resolved
 directly (not through python toolchain resolution, which consumers can
