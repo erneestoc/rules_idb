@@ -293,13 +293,6 @@ for runtime_devices in devices.values():
             print(device["udid"])
             sys.exit(0)
 
-if not device_type:
-    device_types = json.loads(simctl("list", "devicetypes", "-j"))["devicetypes"]
-    iphones = [d for d in device_types if d.get("productFamily") == "iPhone"]
-    if not iphones:
-        sys.exit("error: no iPhone device types available")
-    device_type = iphones[-1]["name"]
-
 runtimes = [
     r
     for r in json.loads(simctl("list", "runtimes", "-j"))["runtimes"]
@@ -314,8 +307,37 @@ if os_version:
 if not runtimes:
     sys.exit("error: no available iOS runtime matching version %r" % os_version)
 runtimes.sort(key=lambda r: [int(x) for x in r["version"].split(".")])
+runtime = runtimes[-1]
 
-print("CREATED:" + simctl("create", name, device_type, runtimes[-1]["identifier"]).strip())
+if not device_type:
+    # Pick the newest iPhone the chosen runtime actually supports, using the
+    # hardware model identifier (e.g. "iPhone18,1") as the recency key --
+    # neither simctl list is ordered chronologically. The iPod touch reports
+    # the iPhone product family but is incompatible with modern runtimes.
+    supported = {d["identifier"] for d in runtime.get("supportedDeviceTypes", [])}
+    device_types = json.loads(simctl("list", "devicetypes", "-j"))["devicetypes"]
+
+    def model_key(d):
+        model = d.get("modelIdentifier", "")
+        digits = model[len("iPhone"):] if model.startswith("iPhone") else ""
+        try:
+            major, minor = digits.split(",")
+            return (int(major), int(minor))
+        except ValueError:
+            return (0, 0)
+
+    iphones = [
+        d
+        for d in device_types
+        if d.get("productFamily") == "iPhone"
+        and d.get("modelIdentifier", "").startswith("iPhone")
+        and d["identifier"] in supported
+    ]
+    if not iphones:
+        sys.exit("error: no iPhone device types supported by runtime %s" % runtime["identifier"])
+    device_type = max(iphones, key=model_key)["name"]
+
+print("CREATED:" + simctl("create", name, device_type, runtime["identifier"]).strip())
 PYEOF
 )
   if [[ "$simulator_id" == CREATED:* ]]; then
