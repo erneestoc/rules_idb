@@ -10,7 +10,7 @@ docs/BUILDING_IDB.md).
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-COMPANION_RELEASE = "v0.1.1"
+COMPANION_RELEASE = "v0.1.2"
 COMPANION_SHA256 = "b647e14d79f51cb0bffdf433599536a84c1155f48d4deb92525320e713a5fa09"
 
 _COMPANION_BUILD = """
