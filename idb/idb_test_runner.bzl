@@ -17,6 +17,7 @@ load(
     "AppleDeviceTestRunnerInfo",
     "apple_provider",
 )
+load("@rules_python//python:py_info.bzl", "PyInfo")
 
 def _get_template_substitutions(ctx, *, create_simulator_action_binary, clean_up_simulator_action_binary, pre_action_binary, post_action_binary, post_action_determines_exit_code):
     substitutions = {
@@ -25,7 +26,8 @@ def _get_template_substitutions(ctx, *, create_simulator_action_binary, clean_up
         "pool_size": str(ctx.attr.pool_size),
         "shutdown_after_test": "true" if ctx.attr.shutdown_simulator_after_test else "false",
         "idb_path": ctx.attr.idb_path,
-        "idb_client_path": ctx.executable._idb_client.short_path,
+        "idb_python_path": ctx.file._python.short_path,
+        "idb_client_imports": ":".join(ctx.attr._idb_client_lib[PyInfo].imports.to_list()),
         "companion_path": _companion_binary(ctx).short_path,
         "random": "true" if ctx.attr.random else "false",
         "create_simulator_action_binary": create_simulator_action_binary,
@@ -44,8 +46,17 @@ def _companion_binary(ctx):
 
 def _ios_idb_test_runner_impl(ctx):
     runfiles = ctx.runfiles(transitive_files = ctx.attr._companion.files)
-    runfiles = runfiles.merge(ctx.attr._idb_client[DefaultInfo].default_runfiles)
-    runfiles = runfiles.merge(ctx.runfiles(files = [ctx.executable._idb_client]))
+
+    # The client is launched directly with the hermetic interpreter from
+    # runfiles rather than as a py_binary: py_binary resolves its interpreter
+    # through toolchain resolution, which the consumer's root module can
+    # (and in practice does) redirect to a system python that is too old for
+    # the client.
+    runfiles = runfiles.merge(ctx.attr._idb_client_lib[DefaultInfo].default_runfiles)
+    runfiles = runfiles.merge(ctx.runfiles(
+        files = [ctx.file._python],
+        transitive_files = ctx.attr._idb_client_lib[PyInfo].transitive_sources,
+    ))
 
     default_action_binary = "/usr/bin/true"
 
@@ -210,11 +221,20 @@ criteria.
             default = Label("@idb_companion_dist//:dist"),
             doc = "Prebuilt idb_companion distribution (binary + simulator shims).",
         ),
-        "_idb_client": attr.label(
+        "_idb_client_lib": attr.label(
             cfg = "exec",
-            default = Label("//third_party/idb_client:idb_client"),
-            executable = True,
-            doc = "Bundled fb-idb python client (hermetic python).",
+            default = Label("//third_party/idb_client:idb_client_lib"),
+            doc = "Bundled fb-idb python client library.",
+        ),
+        "_python": attr.label(
+            allow_single_file = True,
+            cfg = "exec",
+            default = Label("@python_3_12_host//:python"),
+            doc = """
+Hermetic python interpreter used to run the bundled client, resolved
+directly (not through python toolchain resolution, which consumers can
+override with interpreters too old for the client).
+""",
         ),
         "_test_template": attr.label(
             default = Label("//idb:idb_test_runner.template.sh"),
