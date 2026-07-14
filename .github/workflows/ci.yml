@@ -44,7 +44,10 @@ jobs:
           ./build.sh build Shimulator-iOS
           ./build.sh build Shimulator-macOS
           ./build.sh build SimulatorFrameworkBridge
-          ./build.sh build idb_companion
+          # First clean invocation reliably fails with "no such module
+          # IDBGRPCSwift" (upstream xcodegen project quirk); the framework
+          # exists afterwards and the retry succeeds.
+          ./build.sh build idb_companion || ./build.sh build idb_companion
           R=Build/Products/Release
           S=Build/Products/Release-iphonesimulator
           D="$GITHUB_WORKSPACE/idb-dist"

@@ -56,7 +56,9 @@ builds internally with Buck; none of these paths are covered by their CI):
 cd ~/workspace/idb-src
 ./build.sh build shims
 ./build.sh build SimulatorFrameworkBridge
-./build.sh build idb_companion
+./build.sh build idb_companion || ./build.sh build idb_companion
+# (a clean first invocation can fail with "no such module IDBGRPCSwift";
+# the retry succeeds — upstream project-generation quirk)
 ```
 
 Then assemble the runtime layout (skipping `idb-repl`, which needs a
