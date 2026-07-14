@@ -5,7 +5,15 @@ Long-term state also lives in the Claude project memory
 (`rules-idb-project.md`); this doc captures the tail end of the
 performance-investigation session.
 
-## Uncommitted working-tree state (deliberately NOT pushed)
+## Update (later same session): SHIPPED
+The chmod slimming, tree-artifact default (.bazelrc + README Performance
+section + runner hint on archive staging), and tests/validate.sh (11
+behavioral checks: failure detection, JUnit counts, filter exactness,
+no-tests guard, post_action gating) were committed and pushed; validate.sh
+runs on the 26.2 CI leg. CI result pending at handoff time — check
+gh run list. The section below is retained for history.
+
+## Uncommitted working-tree state (historical; since shipped)
 
 `idb/idb_test_runner.template.sh`: staging chmod slimmed —
 `chmod -R u+rwX` on the `cp -cRL` (tree-artifact) paths, **no chmod** after
