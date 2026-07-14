@@ -147,8 +147,8 @@ used.
         "max_concurrent_boots": attr.int(
             default = 4,
             doc = """
-Maximum number of simulators booted concurrently, machine-wide across all
-pools and test actions. Already-booted simulators are unaffected. The
+Maximum number of simulators created/booted concurrently, machine-wide
+across all pools and test actions. Already-booted simulators are unaffected. The
 optimum is machine-dependent (measured on an M4 Max: 4 concurrent re-boots
 of 4 simulators took 13s vs 31s fully serialized, so parallelism wins on
 strong hardware; low-memory or busy CI machines benefit from a lower cap).

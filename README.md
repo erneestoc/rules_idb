@@ -169,7 +169,8 @@ never grows beyond that number of simulators.
 
 ### Boot concurrency and pre-booting
 
-Boots (and only boots — warm simulators are unaffected) are gated
+Simulator creation and boots (and only those — warm simulators are
+unaffected) are gated
 machine-wide to **4 concurrent** by default; tune with the
 `max_concurrent_boots` attribute or `RULES_IDB_MAX_CONCURRENT_BOOTS`. The
 optimum is machine-dependent — on an M4 Max, booting 4 simulators took 13s

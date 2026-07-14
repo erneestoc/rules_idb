@@ -309,12 +309,14 @@ except OSError:
   done
   echo "note: acquired simulator pool slot $acquired_slot (pool: $pool_key)" >&2
 
-  # Find or create the simulator bound to this pool slot.
+  # Find or create the simulator bound to this pool slot. The lookup runs
+  # ungated; creation happens under the boot gate below.
   simulator_name="rules_idb.$pool_key.$acquired_slot"
-  simulator_id=$("$python_bin" - "$simulator_name" "$device_type" "$os_version" <<'PYEOF'
+  simulator_pool_py() {
+  "$python_bin" - "$1" "$simulator_name" "$device_type" "$os_version" <<'PYEOF'
 import json, subprocess, sys
 
-name, device_type, os_version = sys.argv[1], sys.argv[2], sys.argv[3]
+mode, name, device_type, os_version = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 def simctl(*args):
     return subprocess.check_output(["xcrun", "simctl", *args], text=True)
@@ -325,6 +327,10 @@ for runtime_devices in devices.values():
         if device["name"] == name and device.get("isAvailable", True):
             print(device["udid"] + ":" + device.get("state", "Shutdown"))
             sys.exit(0)
+
+if mode == "find":
+    print("NOTFOUND")
+    sys.exit(0)
 
 runtimes = [
     r
@@ -372,21 +378,24 @@ if not device_type:
 
 print("CREATED:" + simctl("create", name, device_type, runtime["identifier"]).strip())
 PYEOF
-)
-  simulator_state="Shutdown"
-  if [[ "$simulator_id" == CREATED:* ]]; then
-    simulator_was_created=true
-    simulator_id="${simulator_id#CREATED:}"
-  else
-    simulator_state="${simulator_id##*:}"
-    simulator_id="${simulator_id%%:*}"
-  fi
-  echo "note: using simulator '$simulator_name' ($simulator_id, $simulator_state)" >&2
+  }
 
-  if [[ "$simulator_state" != "Booted" ]]; then
-    # Gate concurrent boots machine-wide: booting many simulators at once is
-    # slower than staggering them. Same auto-releasing flock mechanism as
-    # the pool, on fd 201; released explicitly once the boot finishes.
+  result=$(simulator_pool_py find)
+  simulator_id=""
+  simulator_state="Shutdown"
+  needs_create=false
+  if [[ "$result" == "NOTFOUND" ]]; then
+    needs_create=true
+  else
+    simulator_state="${result##*:}"
+    simulator_id="${result%%:*}"
+    echo "note: using simulator '$simulator_name' ($simulator_id, $simulator_state)" >&2
+  fi
+
+  if [[ "$needs_create" == true || "$simulator_state" != "Booted" ]]; then
+    # Gate concurrent simulator creation and boots machine-wide: doing many
+    # at once is slower than staggering them. Same auto-releasing flock
+    # mechanism as the pool, on fd 201; released once the boot finishes.
     boot_gate_dir="$pool_root/boot-gate"
     mkdir -p "$boot_gate_dir"
     boot_slot=""
@@ -402,9 +411,16 @@ PYEOF
         bslot=$((bslot + 1))
       done
       [[ -n "$boot_slot" ]] && break
-      echo "note: waiting for a boot slot ($max_concurrent_boots concurrent boots max)" >&2
+      echo "note: waiting for a boot slot ($max_concurrent_boots concurrent creates/boots max)" >&2
       sleep 2
     done
+
+    if [[ "$needs_create" == true ]]; then
+      simulator_id=$(simulator_pool_py create)
+      simulator_was_created=true
+      simulator_id="${simulator_id#CREATED:}"
+      echo "note: created simulator '$simulator_name' ($simulator_id)" >&2
+    fi
 
     # Boot the simulator and wait until it is usable.
     if ! xcrun simctl bootstatus "$simulator_id" -b >&2; then
