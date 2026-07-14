@@ -19,6 +19,18 @@ load(
 )
 load("@rules_python//python:py_info.bzl", "PyInfo")
 
+def _py312_transition_impl(_settings, _attr):
+    return {"@rules_python//python/config_settings:python_version": "3.12"}
+
+# The vendored client and its locked pip wheels target python 3.12; pin the
+# configuration on the dependency edge so the consumer's default python
+# version doesn't break wheel selection.
+_py312_transition = transition(
+    implementation = _py312_transition_impl,
+    inputs = [],
+    outputs = ["@rules_python//python/config_settings:python_version"],
+)
+
 def _get_template_substitutions(ctx, *, create_simulator_action_binary, clean_up_simulator_action_binary, pre_action_binary, post_action_binary, post_action_determines_exit_code):
     substitutions = {
         "device_type": ctx.attr.device_type,
@@ -27,7 +39,7 @@ def _get_template_substitutions(ctx, *, create_simulator_action_binary, clean_up
         "shutdown_after_test": "true" if ctx.attr.shutdown_simulator_after_test else "false",
         "idb_path": ctx.attr.idb_path,
         "idb_python_path": ctx.file._python.short_path,
-        "idb_client_imports": ":".join(ctx.attr._idb_client_lib[PyInfo].imports.to_list()),
+        "idb_client_imports": ":".join(ctx.attr._idb_client_lib[0][PyInfo].imports.to_list()),
         "companion_path": _companion_binary(ctx).short_path,
         "random": "true" if ctx.attr.random else "false",
         "create_simulator_action_binary": create_simulator_action_binary,
@@ -52,10 +64,10 @@ def _ios_idb_test_runner_impl(ctx):
     # through toolchain resolution, which the consumer's root module can
     # (and in practice does) redirect to a system python that is too old for
     # the client.
-    runfiles = runfiles.merge(ctx.attr._idb_client_lib[DefaultInfo].default_runfiles)
+    runfiles = runfiles.merge(ctx.attr._idb_client_lib[0][DefaultInfo].default_runfiles)
     runfiles = runfiles.merge(ctx.runfiles(
         files = [ctx.file._python],
-        transitive_files = ctx.attr._idb_client_lib[PyInfo].transitive_sources,
+        transitive_files = ctx.attr._idb_client_lib[0][PyInfo].transitive_sources,
     ))
 
     default_action_binary = "/usr/bin/true"
@@ -222,7 +234,7 @@ criteria.
             doc = "Prebuilt idb_companion distribution (binary + simulator shims).",
         ),
         "_idb_client_lib": attr.label(
-            cfg = "exec",
+            cfg = _py312_transition,
             default = Label("//third_party/idb_client:idb_client_lib"),
             doc = "Bundled fb-idb python client library.",
         ),
