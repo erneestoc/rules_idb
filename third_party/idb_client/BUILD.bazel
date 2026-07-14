@@ -28,6 +28,10 @@ py_binary(
     name = "idb_client",
     srcs = ["idb_cli.py"],
     main = "idb_cli.py",
+    # Pin the interpreter regardless of the consumer's default python
+    # version: the vendored client needs >= 3.10 and the locked pip wheels
+    # are resolved for 3.12.
+    python_version = "3.12",
     visibility = ["//visibility:public"],
     deps = [":idb_client_lib"],
 )
