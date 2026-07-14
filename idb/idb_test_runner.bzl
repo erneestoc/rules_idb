@@ -145,15 +145,16 @@ used.
 """,
         ),
         "max_concurrent_boots": attr.int(
-            default = 4,
+            default = 0,
             doc = """
 Maximum number of simulators created/booted concurrently, machine-wide
-across all pools and test actions. Already-booted simulators are unaffected. The
-optimum is machine-dependent (measured on an M4 Max: 4 concurrent re-boots
-of 4 simulators took 13s vs 31s fully serialized, so parallelism wins on
-strong hardware; low-memory or busy CI machines benefit from a lower cap).
-Can be overridden at test time with the `RULES_IDB_MAX_CONCURRENT_BOOTS`
-environment variable.
+across all pools and test actions; already-booted simulators are
+unaffected. `0` (the default) means auto: half the machine's CPU cores.
+Measured on an M4 Max (16 cores, so auto = 8): parallelism won at every
+tested level — 8 create+first-boots took 87s uncapped vs 115s at cap 4 vs
+much longer serialized — while low-memory or busy CI machines benefit from
+a low explicit cap. Can be overridden at test time with the
+`RULES_IDB_MAX_CONCURRENT_BOOTS` environment variable.
 """,
         ),
         "pool_size": attr.int(

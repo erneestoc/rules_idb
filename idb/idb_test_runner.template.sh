@@ -32,6 +32,12 @@ device_type="%(device_type)s"
 os_version="%(os_version)s"
 pool_size="${RULES_IDB_POOL_SIZE:-%(pool_size)s}"
 max_concurrent_boots="${RULES_IDB_MAX_CONCURRENT_BOOTS:-%(max_concurrent_boots)s}"
+if [[ "$max_concurrent_boots" -le 0 ]]; then
+  # Auto: half the CPU cores. Parallel boots win on strong hardware
+  # (measured), while constrained machines need a lower explicit cap.
+  max_concurrent_boots=$(( $(sysctl -n hw.ncpu) / 2 ))
+  [[ "$max_concurrent_boots" -ge 1 ]] || max_concurrent_boots=1
+fi
 shutdown_after_test="%(shutdown_after_test)s"
 python_bin="${RULES_IDB_PYTHON:-python3}"
 

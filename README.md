@@ -125,7 +125,7 @@ the bundled binaries.
 | `device_type` | newest iPhone | `xcrun simctl list devicetypes` name |
 | `os_version` | newest iOS | `xcrun simctl list runtimes` version |
 | `pool_size` | `0` (on demand) | max simulators per (device, OS) pool |
-| `max_concurrent_boots` | `4` | machine-wide cap on simultaneous simulator boots |
+| `max_concurrent_boots` | `0` = auto (ncpu/2) | machine-wide cap on simultaneous simulator creates/boots |
 | `random` | `False` | run tests in random order (requires test host) |
 | `shutdown_simulator_after_test` | `False` | shut simulator down after each test |
 | `idb_path` | `idb` | path to the idb client |
