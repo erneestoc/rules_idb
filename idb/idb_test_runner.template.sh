@@ -31,6 +31,7 @@ fi
 device_type="%(device_type)s"
 os_version="%(os_version)s"
 pool_size="${RULES_IDB_POOL_SIZE:-%(pool_size)s}"
+max_concurrent_boots="${RULES_IDB_MAX_CONCURRENT_BOOTS:-%(max_concurrent_boots)s}"
 shutdown_after_test="%(shutdown_after_test)s"
 python_bin="${RULES_IDB_PYTHON:-python3}"
 
@@ -281,21 +282,21 @@ else
   pool_dir="$pool_root/$pool_key"
   mkdir -p "$pool_dir"
 
-  # Locks fd 200 (inherited from this shell) without blocking; exits 1 if
-  # the lock is held by another test action.
-  try_flock_200() {
+  # Locks the given fd (inherited from this shell) without blocking; exits
+  # 1 if the lock is held by another test action.
+  try_flock() {
     "$python_bin" -c 'import fcntl, sys
 try:
-    fcntl.flock(200, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
 except OSError:
-    sys.exit(1)'
+    sys.exit(1)' "$1"
   }
 
   acquired_slot=""
   slot=0
   while true; do
     exec 200>>"$pool_dir/slot-$slot.lock"
-    if try_flock_200; then
+    if try_flock 200; then
       acquired_slot=$slot
       break
     fi
@@ -322,7 +323,7 @@ devices = json.loads(simctl("list", "devices", "-j"))["devices"]
 for runtime_devices in devices.values():
     for device in runtime_devices:
         if device["name"] == name and device.get("isAvailable", True):
-            print(device["udid"])
+            print(device["udid"] + ":" + device.get("state", "Shutdown"))
             sys.exit(0)
 
 runtimes = [
@@ -372,26 +373,57 @@ if not device_type:
 print("CREATED:" + simctl("create", name, device_type, runtime["identifier"]).strip())
 PYEOF
 )
+  simulator_state="Shutdown"
   if [[ "$simulator_id" == CREATED:* ]]; then
     simulator_was_created=true
     simulator_id="${simulator_id#CREATED:}"
+  else
+    simulator_state="${simulator_id##*:}"
+    simulator_id="${simulator_id%%:*}"
   fi
-  echo "note: using simulator '$simulator_name' ($simulator_id)" >&2
+  echo "note: using simulator '$simulator_name' ($simulator_id, $simulator_state)" >&2
 
-  # Boot the simulator (no-op if already booted) and wait until it is usable.
-  if ! xcrun simctl bootstatus "$simulator_id" -b >&2; then
-    # Exit code 149 means "already booted"; other states are tolerated the
-    # same way rules_apple's simulator_creator does -- idb will surface real
-    # errors.
-    echo "note: ignoring non-zero 'simctl bootstatus' exit code" >&2
-  fi
+  if [[ "$simulator_state" != "Booted" ]]; then
+    # Gate concurrent boots machine-wide: booting many simulators at once is
+    # slower than staggering them. Same auto-releasing flock mechanism as
+    # the pool, on fd 201; released explicitly once the boot finishes.
+    boot_gate_dir="$pool_root/boot-gate"
+    mkdir -p "$boot_gate_dir"
+    boot_slot=""
+    while true; do
+      bslot=0
+      while [[ "$bslot" -lt "$max_concurrent_boots" ]]; do
+        exec 201>>"$boot_gate_dir/slot-$bslot.lock"
+        if try_flock 201; then
+          boot_slot=$bslot
+          break
+        fi
+        exec 201>&-
+        bslot=$((bslot + 1))
+      done
+      [[ -n "$boot_slot" ]] && break
+      echo "note: waiting for a boot slot ($max_concurrent_boots concurrent boots max)" >&2
+      sleep 2
+    done
 
-  # A simulator's very first boot finishes data migration slightly before
-  # SpringBoard can actually launch apps; give a freshly created device a
-  # few seconds to settle to avoid a first-run launch race.
-  if [[ "$simulator_was_created" == true ]]; then
-    echo "note: freshly created simulator; waiting for SpringBoard to settle" >&2
-    sleep 10
+    # Boot the simulator and wait until it is usable.
+    if ! xcrun simctl bootstatus "$simulator_id" -b >&2; then
+      # Exit code 149 means "already booted"; other states are tolerated the
+      # same way rules_apple's simulator_creator does -- idb will surface
+      # real errors.
+      echo "note: ignoring non-zero 'simctl bootstatus' exit code" >&2
+    fi
+
+    # A simulator's very first boot finishes data migration slightly before
+    # SpringBoard can actually launch apps; give a freshly created device a
+    # few seconds to settle to avoid a first-run launch race.
+    if [[ "$simulator_was_created" == true ]]; then
+      echo "note: freshly created simulator; waiting for SpringBoard to settle" >&2
+      sleep 10
+    fi
+
+    # Release the boot slot; the pool slot lock (fd 200) stays held.
+    exec 201>&-
   fi
 fi
 

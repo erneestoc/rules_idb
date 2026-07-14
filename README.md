@@ -125,6 +125,7 @@ the bundled binaries.
 | `device_type` | newest iPhone | `xcrun simctl list devicetypes` name |
 | `os_version` | newest iOS | `xcrun simctl list runtimes` version |
 | `pool_size` | `0` (on demand) | max simulators per (device, OS) pool |
+| `max_concurrent_boots` | `3` | machine-wide cap on simultaneous simulator boots |
 | `random` | `False` | run tests in random order (requires test host) |
 | `shutdown_simulator_after_test` | `False` | shut simulator down after each test |
 | `idb_path` | `idb` | path to the idb client |
@@ -165,6 +166,26 @@ every test action a private `$HOME`; the pool must be shared across actions.)
 
 Because Bazel caps concurrent test actions at `--local_test_jobs`, the pool
 never grows beyond that number of simulators.
+
+### Boot concurrency and pre-booting
+
+Simulator boots are I/O heavy: booting many at once is slower than
+staggering them. Boots (and only boots — warm simulators are unaffected)
+are gated machine-wide to **3 concurrent** by default; tune with the
+`max_concurrent_boots` attribute or `RULES_IDB_MAX_CONCURRENT_BOOTS`.
+
+To start warm — e.g. at CI-agent startup or before a big local run:
+
+```sh
+bazel run @rules_idb//tools:preboot -- 4                          # default pool
+bazel run @rules_idb//tools:preboot -- 4 --device "iPhone 17 Pro" # named pool
+```
+
+`preboot` is a desired-state command: it creates/boots the N pool
+simulators that are missing, skips ones already booted, and shuts down any
+booted `rules_idb.*` simulator outside the requested set, so you end with
+exactly N booted. It never touches simulators it didn't name. Use
+`--no-reconcile` to only boot.
 
 ### Simulator lifecycle and cleanup
 

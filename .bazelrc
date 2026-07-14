@@ -7,6 +7,7 @@ test --test_env=RULES_IDB_IDB_PATH
 test --test_env=RULES_IDB_COMPANION_PATH
 test --test_env=RULES_IDB_POOL_DIR
 test --test_env=RULES_IDB_POOL_SIZE
+test --test_env=RULES_IDB_MAX_CONCURRENT_BOOTS
 test --test_env=RULES_IDB_SHUTDOWN_SIMULATOR
 test --test_env=DEBUG_IDB_TEST_RUNNER
 
