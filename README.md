@@ -166,6 +166,21 @@ every test action a private `$HOME`; the pool must be shared across actions.)
 Because Bazel caps concurrent test actions at `--local_test_jobs`, the pool
 never grows beyond that number of simulators.
 
+### Simulator lifecycle and cleanup
+
+Pool simulators are created on demand (one per concurrency slot actually
+used, per device/OS pool) and then **reused indefinitely** — repeat runs
+never create more. They are intentionally left **booted** so warm runs skip
+the ~30s boot; that idle RAM is the trade. Your options:
+
+* `tools/clean_simulators.sh` — shut all `rules_idb.*` simulators down
+  (keeps them for warm reuse); `--delete` removes them entirely.
+* `shutdown_simulator_after_test = True` on the runner (or
+  `RULES_IDB_SHUTDOWN_SIMULATOR=1` at test time) — every run shuts its
+  simulator down afterwards; right choice for RAM-constrained laptops,
+  costs a boot per cold run.
+* `pool_size = N` — hard-cap how many simulators a pool may create.
+
 ## Benchmarks
 
 ```sh
