@@ -9,7 +9,21 @@ them:
 3. **The Xcode/macOS version** the artifact was built with and the versions
    it was verified against.
 
-## Cutting a release
+## Cutting a release (BCR-enabled flow)
+
+Pushing a `v*` tag now runs the Release workflow: it creates a DRAFT
+release with a deterministic source archive (`rules_idb-<version>.tar.gz`,
+what BCR pins). You then attach the companion artifact, write the notes
+(template below), and **publish** the release — publishing triggers the
+publish-to-BCR workflow, which opens the version PR against
+bazel-central-registry from the erneestoc fork.
+
+One-time setup still required: add a classic PAT with repo+workflow scope
+as the `BCR_PUBLISH_TOKEN` repository secret (the fork
+erneestoc/bazel-central-registry already exists). The first BCR submission
+adds the module directory itself; expect BCR maintainer review.
+
+## Cutting a release (manual details)
 
 1. If bumping the idb pin (or Xcode broke something):
    - Update the local checkout, re-apply/extend the patch, and rebuild per

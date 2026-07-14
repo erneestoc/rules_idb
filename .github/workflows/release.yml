@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create deterministic source archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git archive --prefix="rules_idb-$VERSION/" -o "rules_idb-$VERSION.tar.gz" "$GITHUB_REF_NAME"
+          shasum -a 256 "rules_idb-$VERSION.tar.gz"
+
+      # Create first, upload with retries after: attaching assets during
+      # create can time out and leave hidden drafts.
+      - name: Create release and upload source archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --generate-notes || true
+          for i in 1 2 3; do gh release upload "$GITHUB_REF_NAME" "rules_idb-$VERSION.tar.gz" --clobber && break; done
+          echo "NOTE: attach the idb-companion-dist.tar.gz artifact (build-idb-dist workflow), update the release notes per RELEASING.md, then un-draft. Publishing the release triggers the BCR PR."

@@ -1,0 +1,13 @@
+{
+    "homepage": "https://github.com/erneestoc/rules_idb",
+    "maintainers": [
+        {
+            "name": "Ernesto Cambuston",
+            "email": "e.cambuston@gmail.com",
+            "github": "erneestoc"
+        }
+    ],
+    "repository": ["github:erneestoc/rules_idb"],
+    "versions": [],
+    "yanked_versions": {}
+}
