@@ -75,8 +75,10 @@ jobs:
             required: true
           - xcode: "26.5"
             required: true
-          - xcode: "27" # beta: informational only
-            required: false
+          # Xcode 27 beta is not on GitHub's images yet
+          # (actions/runner-images#14196); re-add when it ships:
+          # - xcode: "27"
+          #   required: false
     runs-on: macos-26
     timeout-minutes: 60
     continue-on-error: ${{ !matrix.required }}
