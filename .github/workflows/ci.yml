@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+
+      - name: Build everything
+        run: bazelisk build //idb/... //examples:HostedTests //examples:LogicTests //examples:UITests
+
+      - name: Run logic tests on a simulator
+        run: bazelisk test //examples:LogicTests --test_output=all
+
+      - name: Run hosted tests on a simulator
+        run: bazelisk test //examples:HostedTests --test_output=all

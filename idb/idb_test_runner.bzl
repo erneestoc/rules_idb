@@ -25,6 +25,8 @@ def _get_template_substitutions(ctx, *, create_simulator_action_binary, clean_up
         "pool_size": str(ctx.attr.pool_size),
         "shutdown_after_test": "true" if ctx.attr.shutdown_simulator_after_test else "false",
         "idb_path": ctx.attr.idb_path,
+        "idb_client_path": ctx.executable._idb_client.short_path,
+        "companion_path": _companion_binary(ctx).short_path,
         "random": "true" if ctx.attr.random else "false",
         "create_simulator_action_binary": create_simulator_action_binary,
         "clean_up_simulator_action_binary": clean_up_simulator_action_binary,
@@ -34,8 +36,16 @@ def _get_template_substitutions(ctx, *, create_simulator_action_binary, clean_up
     }
     return {"%({})s".format(key): value for key, value in substitutions.items()}
 
+def _companion_binary(ctx):
+    for f in ctx.attr._companion.files.to_list():
+        if f.basename == "idb_companion":
+            return f
+    fail("idb_companion binary not found in @idb_companion_dist//:dist")
+
 def _ios_idb_test_runner_impl(ctx):
-    runfiles = ctx.runfiles()
+    runfiles = ctx.runfiles(transitive_files = ctx.attr._companion.files)
+    runfiles = runfiles.merge(ctx.attr._idb_client[DefaultInfo].default_runfiles)
+    runfiles = runfiles.merge(ctx.runfiles(files = [ctx.executable._idb_client]))
 
     default_action_binary = "/usr/bin/true"
 
@@ -137,13 +147,12 @@ footprint.
 """,
         ),
         "idb_path": attr.string(
-            default = "idb",
+            default = "",
             doc = """
-Path to the `idb` client binary. Defaults to finding `idb` on `PATH`.
-`idb_companion` must also be discoverable on `PATH` or through the
-`RULES_IDB_COMPANION_PATH` environment variable. See docs/BUILDING_IDB.md;
-both must currently be built from facebook/idb main. Can be overridden at
-test time with the `RULES_IDB_IDB_PATH` environment variable.
+Path to an `idb` client binary. When empty (the default) the client bundled
+with rules_idb is used; nothing needs to be installed. Can be overridden at
+test time with the `RULES_IDB_IDB_PATH` environment variable (and
+`RULES_IDB_COMPANION_PATH` for the companion).
 """,
         ),
         "create_simulator_action": attr.label(
@@ -196,6 +205,16 @@ When true, the exit code of the test run is the exit code of the
 `post_action`. Useful for tests that need to fail based on their own
 criteria.
 """,
+        ),
+        "_companion": attr.label(
+            default = Label("@idb_companion_dist//:dist"),
+            doc = "Prebuilt idb_companion distribution (binary + simulator shims).",
+        ),
+        "_idb_client": attr.label(
+            cfg = "exec",
+            default = Label("//third_party/idb_client:idb_client"),
+            executable = True,
+            doc = "Bundled fb-idb python client (hermetic python).",
         ),
         "_test_template": attr.label(
             default = Label("//idb:idb_test_runner.template.sh"),

@@ -32,8 +32,24 @@ device_type="%(device_type)s"
 os_version="%(os_version)s"
 pool_size="${RULES_IDB_POOL_SIZE:-%(pool_size)s}"
 shutdown_after_test="%(shutdown_after_test)s"
-idb_bin="${RULES_IDB_IDB_PATH:-%(idb_path)s}"
 python_bin="${RULES_IDB_PYTHON:-python3}"
+
+# Resolve a runfiles short_path against the test's runfiles tree.
+runfile() {
+  local p="$1"
+  if [[ "$p" == ../* ]]; then
+    echo "${TEST_SRCDIR}/${p#../}"
+  else
+    echo "${TEST_SRCDIR}/${TEST_WORKSPACE}/$p"
+  fi
+}
+
+# Tool resolution precedence: test-time env override, then the runner rule's
+# idb_path attribute, then the client/companion bundled with rules_idb.
+idb_bin="${RULES_IDB_IDB_PATH:-%(idb_path)s}"
+if [[ -z "$idb_bin" ]]; then
+  idb_bin="$(runfile "%(idb_client_path)s")"
+fi
 random_order="%(random)s"
 create_simulator_action_binary="%(create_simulator_action_binary)s"
 clean_up_simulator_action_binary="%(clean_up_simulator_action_binary)s"
@@ -42,17 +58,16 @@ post_action_binary="%(post_action_binary)s"
 post_action_determines_exit_code="%(post_action_determines_exit_code)s"
 
 if ! command -v "$idb_bin" >/dev/null 2>&1; then
-  echo "error: 'idb' client not found at '$idb_bin'. See rules_idb's" >&2
-  echo "docs/BUILDING_IDB.md; point RULES_IDB_IDB_PATH or the runner's" >&2
-  echo "idb_path attribute at a source-built idb client." >&2
+  echo "error: 'idb' client not found at '$idb_bin'." >&2
   exit 1
 fi
 
-companion_bin="${RULES_IDB_COMPANION_PATH:-idb_companion}"
+companion_bin="${RULES_IDB_COMPANION_PATH:-}"
+if [[ -z "$companion_bin" ]]; then
+  companion_bin="$(runfile "%(companion_path)s")"
+fi
 if ! command -v "$companion_bin" >/dev/null 2>&1; then
-  echo "error: 'idb_companion' not found at '$companion_bin'. See rules_idb's" >&2
-  echo "docs/BUILDING_IDB.md; point RULES_IDB_COMPANION_PATH at a source-built" >&2
-  echo "idb_companion." >&2
+  echo "error: 'idb_companion' not found at '$companion_bin'." >&2
   exit 1
 fi
 

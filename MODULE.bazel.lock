@@ -202,6 +202,27 @@
   },
   "selectedYankedVersions": {},
   "moduleExtensions": {
+    "//idb:extensions.bzl%idb": {
+      "general": {
+        "bzlTransitiveDigest": "uZ83keRqGfpANQ1H1f/U5HEDOVcgiAQBXiKnrT4rPnM=",
+        "usagesDigest": "QsjmjQB2MYabXR4ly2eRg67Ux1R+cUx6P9f4p9VxAZs=",
+        "recordedInputs": [
+          "REPO_MAPPING:,bazel_tools bazel_tools"
+        ],
+        "generatedRepoSpecs": {
+          "idb_companion_dist": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/erneestoc/rules_idb/releases/download/v0.1.0/idb-companion-dist.tar.gz"
+              ],
+              "sha256": "b647e14d79f51cb0bffdf433599536a84c1155f48d4deb92525320e713a5fa09",
+              "build_file_content": "\npackage(default_visibility = [\"//visibility:public\"])\n\nfilegroup(\n    name = \"dist\",\n    srcs = glob([\"**\"]),\n)\n\nexports_files([\"idb_companion\"])\n"
+            }
+          }
+        }
+      }
+    },
     "@@rules_kotlin+//src/main/starlark/core/repositories:bzlmod_setup.bzl%rules_kotlin_extensions": {
       "general": {
         "bzlTransitiveDigest": "+Kp6j204mBZ3mxlIDDR0gBoP45BZ4jYRhRAcB8sU0qc=",

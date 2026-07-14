@@ -1,0 +1,80 @@
+name: Build idb companion distribution
+
+# Rebuilds the prebuilt idb_companion artifact from a pinned facebook/idb
+# commit plus patches/idb-build-fixes.patch, and (optionally) attaches it to
+# a release. Run this when bumping the idb pin or the Xcode toolchain.
+
+on:
+  workflow_dispatch:
+    inputs:
+      idb_commit:
+        description: "facebook/idb commit to build"
+        required: true
+        default: "70d75b32ada839d85a860029e4c9da0224fe57eb"
+      release_tag:
+        description: "Existing release tag to attach the artifact to (empty = artifact only)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Install build tools
+        run: brew install xcodegen protobuf swift-protobuf
+
+      - name: Check out facebook/idb at pinned commit
+        run: |
+          git clone https://github.com/facebook/idb.git idb-src
+          cd idb-src
+          git checkout "${{ inputs.idb_commit }}"
+          git apply "$GITHUB_WORKSPACE/patches/idb-build-fixes.patch"
+
+      - name: Build companion, shims, and simulator bridge
+        run: |
+          cd idb-src
+          ./build.sh build shims
+          ./build.sh build SimulatorFrameworkBridge
+          ./build.sh build idb_companion
+
+      - name: Assemble distribution
+        run: |
+          cd idb-src
+          R=Build/Products/Release
+          S=Build/Products/Release-iphonesimulator
+          D="$GITHUB_WORKSPACE/idb-dist"
+          mkdir -p "$D/Resources"
+          cp "$R/idb_companion" "$D/"
+          for b in "$R"/*.bundle; do [ -e "$b" ] && ditto "$b" "$D/$(basename "$b")"; done
+          cp "$S/libShimulator-iOS.dylib" "$R/libShimulator-macOS.dylib" \
+             "$S/libRepl-iOS.dylib" "$R/libRepl-macOS.dylib" \
+             "$S/SimulatorFrameworkBridge" "$D/Resources/"
+          tar -czf "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz" -C "$D" .
+          shasum -a 256 "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz" | tee "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz.sha256"
+
+      - name: Smoke test the companion
+        run: |
+          ./idb-dist/idb_companion --list 1 | head -3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: idb-companion-dist
+          path: |
+            idb-companion-dist.tar.gz
+            idb-companion-dist.tar.gz.sha256
+
+      - name: Attach to release
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ inputs.release_tag }}" \
+            idb-companion-dist.tar.gz idb-companion-dist.tar.gz.sha256 --clobber

@@ -13,11 +13,19 @@ simulators and cleans the lock up in shell traps.
 
 `rules_idb` replaces only the *run* phase: bundling, code signing, and
 providers all still come from rules_apple. It is a drop-in `runner` for
-`ios_unit_test`:
+`ios_unit_test` and `ios_ui_test`, and it is fully self-contained: the idb
+client ships vendored (on a hermetic python toolchain) and the prebuilt
+`idb_companion` is fetched from this repository's releases. **The only host
+requirement is Xcode.**
 
 ```bzl
 # MODULE.bazel
 bazel_dep(name = "rules_idb", version = "0.1.0")
+git_override(  # until rules_idb is published to the Bazel Central Registry
+    module_name = "rules_idb",
+    remote = "https://github.com/erneestoc/rules_idb.git",
+    commit = "<pin a commit>",
+)
 ```
 
 ```bzl
@@ -39,7 +47,8 @@ ios_unit_test(
 )
 ```
 
-Or use the predefined `@rules_idb//idb:default_runner`.
+Or use the predefined `@rules_idb//idb:default_runner`. For coverage, add
+`coverage --experimental_use_llvm_covmap` to your `.bazelrc`.
 
 ## What you get
 
@@ -88,24 +97,26 @@ Or use the predefined `@rules_idb//idb:default_runner`.
 
 ## Requirements
 
-Both idb halves must currently be built from `facebook/idb` **main** — the
-2022-era releases (`brew install facebook/fb/idb-companion`, `pip3 install
-fb-idb`) are unusable on modern machines:
+Just Xcode. Nothing to `brew install`, no python setup, no PATH plumbing:
 
-* the bottled `idb_companion 1.1.8` misdetects Apple Silicon simulators as
-  x86_64 and refuses arm64 test bundles, and
-* the PyPI `fb-idb 1.1.7` client crashes a current companion's `install`
-  RPC (its streaming pattern trips a `NIOThrowingAsyncSequenceProducer`
-  fatal error).
+* the **idb python client** is vendored in this repository
+  (`third_party/idb_client`, pinned facebook/idb commit) and runs on a
+  hermetic python 3.12 toolchain via rules_python;
+* the **`idb_companion` binary** (plus simulator shims) is prebuilt by this
+  repository's [release pipeline](.github/workflows/build-idb-dist.yml)
+  from the same pinned commit + [patches/](patches/), and downloaded
+  sha256-verified by a module extension. Each release's notes record the
+  idb commit, patch, and Xcode version it was built and verified with (see
+  [RELEASING.md](RELEASING.md)).
 
-See [docs/BUILDING_IDB.md](docs/BUILDING_IDB.md) for the exact build steps
-(including the upstream build fixes this repo carries as patches in
-[patches/](patches/)).
-
-The test action must be able to find both binaries. Either put them on the
-test action's `PATH`, set the `idb_path` attribute, or pass
-`--test_env=RULES_IDB_IDB_PATH=/path/to/idb` and
-`--test_env=PATH=/opt/homebrew/bin:/usr/bin:/bin`.
+Why not upstream binaries? The 2022-era releases are unusable on modern
+machines (the bottled companion misdetects Apple Silicon simulators as
+x86_64; the PyPI client crashes a current companion's install RPC), and
+Meta's open-source build of `main` needed the fixes carried in
+[patches/](patches/). [docs/BUILDING_IDB.md](docs/BUILDING_IDB.md)
+documents building the toolchain yourself; point
+`RULES_IDB_IDB_PATH`/`RULES_IDB_COMPANION_PATH` at the result to override
+the bundled binaries.
 
 ## Runner attributes
 

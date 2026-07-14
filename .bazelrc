@@ -2,16 +2,13 @@
 test --spawn_strategy=local
 test --test_output=errors
 
-# Let the idb runner be configured from the invoking environment.
+# Optional escape hatches for the idb runner (see README).
 test --test_env=RULES_IDB_IDB_PATH
 test --test_env=RULES_IDB_COMPANION_PATH
 test --test_env=RULES_IDB_POOL_DIR
 test --test_env=RULES_IDB_POOL_SIZE
 test --test_env=RULES_IDB_SHUTDOWN_SIMULATOR
-test --test_env=RULES_IDB_KILL_COMPANION
 test --test_env=DEBUG_IDB_TEST_RUNNER
-# idb (and idb_companion, which the client finds on PATH) are host tools.
-test --test_env=PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
 # Apple platform config
 build --apple_platform_type=ios
