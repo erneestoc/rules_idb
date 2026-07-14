@@ -16,6 +16,9 @@ jobs:
     with:
       tag_name: ${{ github.event.release.tag_name || inputs.tag_name }}
       registry_fork: erneestoc/bazel-central-registry
+      # We don't generate build-provenance attestations for the source
+      # archive (that requires publish-to-bcr's paired release workflow).
+      attest: false
     permissions:
       contents: write
       id-token: write
