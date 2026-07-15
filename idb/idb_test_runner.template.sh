@@ -757,6 +757,17 @@ if [[ "${TEST_TOTAL_SHARDS:-1}" -gt 1 ]]; then
     echo "error: shard_count > 1 is not supported for UI tests" >&2
     exit 1
   fi
+  # Swift Testing (@Test) functions are invisible to XCTest enumeration and
+  # suppressed entirely by --tests-to-run filters (verified empirically):
+  # sharding a bundle that links Testing.framework would silently run them
+  # in no shard at all. Refuse loudly instead.
+  if otool -L "$test_bundle_dir/$test_bundle_name" 2>/dev/null \
+      | grep -q "Testing.framework/Testing"; then
+    echo "error: shard_count > 1 is not supported for bundles containing" >&2
+    echo "error: Swift Testing (@Test) tests: they cannot be enumerated for" >&2
+    echo "error: partitioning and every shard would silently skip them." >&2
+    exit 1
+  fi
   # Tell Bazel this runner implements sharding.
   if [[ -n "${TEST_SHARD_STATUS_FILE:-}" ]]; then
     touch "$TEST_SHARD_STATUS_FILE"
@@ -792,6 +803,12 @@ PYEOF
     [[ -n "$shard_test" ]] && only_tests+=("$shard_test")
   done < "$test_tmp_dir/shard_tests.txt"
   echo "note: shard $(( ${TEST_SHARD_INDEX:-0} + 1 ))/${TEST_TOTAL_SHARDS} runs ${#only_tests[@]} tests" >&2
+  if [[ ! -s "$test_tmp_dir/all_tests.json" || "$(cat "$test_tmp_dir/all_tests.json")" == "[]" ]]; then
+    # Nothing enumerable at all: every shard would "pass" while running
+    # nothing. Fail the way an unsharded empty bundle does.
+    echo "error: no tests could be enumerated for sharding, is the test bundle empty?" >&2
+    exit 1
+  fi
   if [[ ${#only_tests[@]} -eq 0 ]]; then
     # More shards than (filtered) tests: an empty shard passes with 0 tests.
     if [[ -n "${XML_OUTPUT_FILE:-}" ]]; then

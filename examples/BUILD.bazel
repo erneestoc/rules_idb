@@ -181,6 +181,19 @@ ios_unit_test(
     deps = [":FailingSwiftTestingTestsLib"],
 )
 
+# Sharding a swift-testing bundle must be rejected (tests can't be
+# enumerated for partitioning); used by the runner's own validation.
+ios_unit_test(
+    name = "SwiftTestingTestsSharded",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    shard_count = 2,
+    tags = ["manual"],
+    test_host = ":HostApp",
+    deps = [":SwiftTestingTestsLib"],
+)
+
 # Bazel test sharding: the runner partitions the bundle's tests per shard.
 ios_unit_test(
     name = "HostedTestsSharded",

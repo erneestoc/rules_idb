@@ -56,5 +56,10 @@ shard_union=$(cat "$TL/examples/HostedTestsSharded/shard_"*"_of_3/test.log" 2>/d
 shard_total=$(cat "$TL/examples/HostedTestsSharded/shard_"*"_of_3/test.log" 2>/dev/null | grep -c '"methodName"')
 check "shards cover all 15 tests exactly once" "[[ '$shard_union' == '15' && '$shard_total' == '15' ]]"
 
+# 9. Sharding a swift-testing bundle must fail loudly, never silently skip.
+bazel test //examples:SwiftTestingTestsSharded --local_test_jobs=1 --nocache_test_results --test_output=summary >/dev/null 2>&1
+check "sharded swift-testing bundle is rejected" "[[ $? -ne 0 ]]"
+check "rejection explains why" "grep -q 'Swift Testing (@Test) tests' '$TL/examples/SwiftTestingTestsSharded/shard_1_of_2/test.log'"
+
 echo
 if [[ $fails -eq 0 ]]; then echo "ALL BEHAVIORAL CHECKS PASSED"; else echo "$fails CHECK(S) FAILED"; exit 1; fi

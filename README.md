@@ -246,10 +246,14 @@ run phase.
   on x86_64 hosts).
 * `XCTSkip`-ped tests do not fail the run, but are reported as passed
   rather than skipped (the idb protocol has no skipped status yet).
-* `shard_count` is supported for hosted and logic tests (the runner lists
-  the bundle's tests through the companion and runs each shard's
-  deterministic slice; `--test_filter` composes). UI tests cannot be
-  sharded.
+* `shard_count` is supported for hosted and logic XCTest bundles (the
+  runner lists the bundle's tests through the companion and runs each
+  shard's deterministic slice; `--test_filter` composes). UI tests cannot
+  be sharded, and bundles containing Swift Testing (`@Test`) tests are
+  rejected with an error: those tests cannot be enumerated for
+  partitioning, so every shard would silently skip them. The same applies
+  to `--test_filter` on a bundle that mixes XCTest and Swift Testing:
+  filters only match the XCTest tests.
 
 Swift Testing (`@Test`) is supported: swift-testing tests execute, report
 per-test results, and their failures fail the target (validated
