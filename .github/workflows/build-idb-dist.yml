@@ -18,14 +18,17 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    # Keep this job's build recipe converged with ci.yml's build-companion
+    # job: the artifact released here must have the same provenance and
+    # contents as what CI validates on every commit.
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
         run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | grep -v beta | sort -V | tail -1)"
           xcodebuild -version
 
       - name: Install build tools
@@ -41,9 +44,15 @@ jobs:
       - name: Build companion, shims, and simulator bridge
         run: |
           cd idb-src
-          ./build.sh build shims
+          # Only what the test runner needs: the Repl shims (idb's REPL
+          # feature, unused here) fail to build on newer toolchains.
+          ./build.sh build Shimulator-iOS
+          ./build.sh build Shimulator-macOS
           ./build.sh build SimulatorFrameworkBridge
-          ./build.sh build idb_companion
+          # First clean invocation reliably fails with "no such module
+          # IDBGRPCSwift" (upstream xcodegen project quirk); the framework
+          # exists afterwards and the retry succeeds.
+          ./build.sh build idb_companion || ./build.sh build idb_companion
 
       - name: Assemble distribution
         run: |
@@ -55,7 +64,6 @@ jobs:
           cp "$R/idb_companion" "$D/"
           for b in "$R"/*.bundle; do [ -e "$b" ] && ditto "$b" "$D/$(basename "$b")"; done
           cp "$S/libShimulator-iOS.dylib" "$R/libShimulator-macOS.dylib" \
-             "$S/libRepl-iOS.dylib" "$R/libRepl-macOS.dylib" \
              "$S/SimulatorFrameworkBridge" "$D/Resources/"
           tar -czf "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz" -C "$D" .
           shasum -a 256 "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz" | tee "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz.sha256"

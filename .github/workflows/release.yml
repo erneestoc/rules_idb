@@ -12,18 +12,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # A release must never ship from an unvalidated commit.
+      # A release must never ship from an unvalidated commit. Any green
+      # completed CI run for this commit counts; a cold-cache companion
+      # build can take ~90 minutes, hence the long window. Tags don't
+      # trigger CI themselves, so a commit that never reached main or a PR
+      # has no run at all -- fail fast on that instead of burning the window.
       - name: Wait for CI to pass on this commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for i in $(seq 1 120); do
-            status=$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --workflow CI --json status,conclusion --jq '.[0].status + "/" + (.[0].conclusion // "")')
-            case "$status" in
-              completed/success) echo "CI green"; exit 0 ;;
-              completed/*) echo "CI failed: $status"; exit 1 ;;
-              *) echo "waiting for CI ($status)"; sleep 30 ;;
-            esac
+          for i in $(seq 1 300); do
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --workflow CI --json status,conclusion --jq 'map(.status + "/" + (.conclusion // "")) | join(" ")')
+            if [[ "$runs" == *"completed/success"* ]]; then echo "CI green"; exit 0; fi
+            if [[ -z "$runs" && "$i" -ge 10 ]]; then
+              echo "no CI run exists for $GITHUB_SHA -- push it to main or a PR first"; exit 1
+            fi
+            if [[ -n "$runs" && "$runs" != *"in_progress"* && "$runs" != *"queued"* && "$runs" != *"waiting"* && "$runs" != *"pending"* && "$runs" != *"requested"* ]]; then
+              echo "all CI runs completed without success: $runs"; exit 1
+            fi
+            echo "waiting for CI ($runs)"; sleep 30
           done
           echo "timed out waiting for CI"; exit 1
 

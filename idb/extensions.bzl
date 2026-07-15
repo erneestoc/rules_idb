@@ -30,6 +30,12 @@ def _idb_impl(module_ctx):
     # revision + patches, e.g. RULES_IDB_COMPANION_DIST_URL=file:///path/to/dist.tar.gz
     override_url = module_ctx.getenv("RULES_IDB_COMPANION_DIST_URL")
     override_sha = module_ctx.getenv("RULES_IDB_COMPANION_DIST_SHA256")
+    if override_url and not override_sha and not override_url.startswith("file://"):
+        fail(
+            "RULES_IDB_COMPANION_DIST_URL points at a remote URL but " +
+            "RULES_IDB_COMPANION_DIST_SHA256 is not set; refusing to fetch " +
+            "an unverified companion binary. file:// URLs are exempt.",
+        )
     http_archive(
         name = "idb_companion_dist",
         urls = [

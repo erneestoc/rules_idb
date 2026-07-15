@@ -204,7 +204,7 @@
   "moduleExtensions": {
     "//idb:extensions.bzl%idb": {
       "general": {
-        "bzlTransitiveDigest": "RWcwtcJHlhCopv8lgSEv0wP0tEWnAsGE4OpGF1IWTQQ=",
+        "bzlTransitiveDigest": "fyEaYtbXqYMYrSdUTgyALCH/Qy72LfTjy2baKs1qnao=",
         "usagesDigest": "fGP6fs8sUFqgncCD8AQ8HkwjorZwElZm2jRtZ9Wol9g=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools",

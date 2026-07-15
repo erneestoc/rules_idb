@@ -19,17 +19,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Selected before the cache step so the Xcode version can be part of
+      # the cache key: without it, an image update that bumps Xcode keeps
+      # serving a companion built by the previous toolchain.
+      - name: Select Xcode
+        id: xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | grep -v beta | sort -V | tail -1)"
+          xcodebuild -version
+          echo "version=$(xcodebuild -version | tr '\n' '-' | tr -c 'A-Za-z0-9.-' '_')" >> "$GITHUB_OUTPUT"
+
       - id: cache
         uses: actions/cache@v4
         with:
           path: idb-companion-dist.tar.gz
-          key: companion-${{ env.IDB_COMMIT }}-${{ hashFiles('patches/idb-build-fixes.patch') }}-v2
-
-      - name: Select Xcode
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | grep -v beta | sort -V | tail -1)"
-          xcodebuild -version
+          key: companion-${{ env.IDB_COMMIT }}-${{ hashFiles('patches/idb-build-fixes.patch') }}-${{ steps.xcode.outputs.version }}-v2
 
       - name: Build companion from pinned commit + patches
         if: steps.cache.outputs.cache-hit != 'true'

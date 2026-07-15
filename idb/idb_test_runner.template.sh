@@ -35,8 +35,15 @@ pool_size="${RULES_IDB_POOL_SIZE:-%(pool_size)s}"
 # running action); what must be bounded separately is the idle residue:
 # each simulator left booted keeps ~60-100 CoreSimulator processes alive.
 # After a test, only the first N slots stay warm; higher slots shut their
-# simulator down.
-warm_pool_size="${RULES_IDB_WARM_POOL_SIZE:-4}"
+# simulator down. Auto default: half the CPU cores (floor 4), matching the
+# boot gate -- benchmarked: sustained 8-wide runs with a cap of 4 spend
+# 15-60s per action re-booting trimmed simulators (and flake under the
+# churn), while a cap matching the concurrency stays flat.
+warm_pool_size="${RULES_IDB_WARM_POOL_SIZE:-}"
+if [[ -z "$warm_pool_size" ]]; then
+  warm_pool_size=$(( $(/usr/sbin/sysctl -n hw.ncpu 2>/dev/null || echo 8) / 2 ))
+  [[ "$warm_pool_size" -ge 4 ]] || warm_pool_size=4
+fi
 max_concurrent_boots="${RULES_IDB_MAX_CONCURRENT_BOOTS:-%(max_concurrent_boots)s}"
 if [[ "$max_concurrent_boots" -le 0 ]]; then
   # Auto: half the CPU cores. Parallel boots win on strong hardware
@@ -46,6 +53,34 @@ if [[ "$max_concurrent_boots" -le 0 ]]; then
 fi
 shutdown_after_test="%(shutdown_after_test)s"
 python_bin="${RULES_IDB_PYTHON:-python3}"
+
+# Millisecond wall clock for the phase timing summary printed after the run.
+now_ms() {
+  /usr/bin/perl -MTime::HiRes=time -e 'printf("%d", time * 1000)' 2>/dev/null \
+    || echo $(( $(date +%s) * 1000 ))
+}
+fmt_ms() {
+  printf '%d.%03ds' $(($1 / 1000)) $(($1 % 1000))
+}
+runner_start_ms=$(now_ms)
+
+# True once SpringBoard has a PID in the simulator's launchd -- the earliest
+# point at which app installs/launches reliably succeed. `simctl bootstatus`
+# is not enough: it can report a terminal failure status yet exit 0, and
+# even a successful boot finishes slightly before SpringBoard is up; running
+# tests in that window fails with zero test results (seen at 8-way
+# concurrency).
+wait_for_springboard() {
+  local udid="$1"
+  for _ in $(seq 1 40); do
+    if xcrun simctl spawn "$udid" launchctl list 2>/dev/null \
+        | grep com.apple.SpringBoard | grep -qv '^-'; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
 
 # Resolve a runfiles short_path against the test's runfiles tree.
 runfile() {
@@ -118,7 +153,7 @@ while [[ $# -gt 0 ]]; do
   arg="$1"
   case $arg in
     --command_line_args=*)
-      IFS="," read -r -a extra_args <<< "${arg##*=}"
+      IFS="," read -r -a extra_args <<< "${arg#*=}"
       command_line_args+=("${extra_args[@]}")
       ;;
     *)
@@ -172,16 +207,22 @@ cleanup() {
     rm -rf "${test_tmp_dir}"
   fi
 }
+# EXIT alone does not cover fatal signals: bash skips the EXIT trap when
+# killed by an unhandled SIGTERM/SIGINT (Bazel's timeout path sends TERM
+# first), which would orphan the companion. Convert them into exits.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 if [[ -z "${NO_CLEAN:-}" ]]; then
   trap cleanup EXIT
 else
-  test_tmp_dir="${TMPDIR:-/tmp}/idb_test_runner_dir"
+  test_tmp_dir="${TMPDIR:-/tmp}/idb_test_runner_dir.$$"
   rm -rf "$test_tmp_dir"
   mkdir -p "$test_tmp_dir"
   echo "note: keeping test dir around at: $test_tmp_dir"
   trap cleanup EXIT
 fi
 
+stage_start_ms=$(now_ms)
 test_bundle_path="%(test_bundle_path)s"
 test_bundle_name=$(basename_without_extension "$test_bundle_path")
 test_bundle_dir="$test_tmp_dir/$test_bundle_name.xctest"
@@ -231,7 +272,7 @@ if [[ "$is_ui_test" == true ]]; then
   runner_app_dir="$test_tmp_dir/$runner_app_name.app"
   runner_bundle_id="com.apple.test.$runner_app_name"
 
-  cp -R "$agents_dir/XCTRunner.app" "$runner_app_dir"
+  cp -cR "$agents_dir/XCTRunner.app" "$runner_app_dir"
   chmod -R 777 "$runner_app_dir"
 
   declare -r sed_delim=$'\001'
@@ -252,25 +293,27 @@ if [[ "$is_ui_test" == true ]]; then
   libraries_path="$developer_dir/Platforms/iPhoneSimulator.platform/Developer/Library"
   runner_frameworks="$runner_app_dir/Frameworks"
   mkdir -p "$runner_frameworks"
-  cp -R "$libraries_path/Frameworks/XCTest.framework" "$runner_frameworks/"
+  cp -cR "$libraries_path/Frameworks/XCTest.framework" "$runner_frameworks/"
   for private_framework in XCTestCore XCTAutomationSupport XCUnit XCTestSupport; do
     if [[ -d "$libraries_path/PrivateFrameworks/$private_framework.framework" ]]; then
-      cp -R "$libraries_path/PrivateFrameworks/$private_framework.framework" "$runner_frameworks/"
+      cp -cR "$libraries_path/PrivateFrameworks/$private_framework.framework" "$runner_frameworks/"
     fi
   done
   if [[ -d "$libraries_path/Frameworks/Testing.framework" ]]; then
-    cp -R "$libraries_path/Frameworks/Testing.framework" "$runner_frameworks/"
+    cp -cR "$libraries_path/Frameworks/Testing.framework" "$runner_frameworks/"
   fi
   # XCUIAutomation moved out of PrivateFrameworks in Xcode 16.3.
   if [[ -d "$libraries_path/Frameworks/XCUIAutomation.framework" ]]; then
-    cp -R "$libraries_path/Frameworks/XCUIAutomation.framework" "$runner_frameworks/"
+    cp -cR "$libraries_path/Frameworks/XCUIAutomation.framework" "$runner_frameworks/"
   else
-    cp -R "$libraries_path/PrivateFrameworks/XCUIAutomation.framework" "$runner_frameworks/"
+    cp -cR "$libraries_path/PrivateFrameworks/XCUIAutomation.framework" "$runner_frameworks/"
   fi
   developer_usr_lib="$developer_dir/Platforms/iPhoneSimulator.platform/Developer/usr/lib"
   cp "$developer_usr_lib/libXCTestSwiftSupport.dylib" "$runner_frameworks/" 2>/dev/null || true
   cp "$developer_usr_lib/libXCTestBundleInject.dylib" "$runner_frameworks/" 2>/dev/null || true
 fi
+
+stage_ms=$(( $(now_ms) - stage_start_ms ))
 
 # ---------------------------------------------------------------------------
 # Acquire a simulator: either through a custom create_simulator_action (the
@@ -341,17 +384,6 @@ mode, name, device_type, os_version = sys.argv[1], sys.argv[2], sys.argv[3], sys
 def simctl(*args):
     return subprocess.check_output(["xcrun", "simctl", *args], text=True)
 
-devices = json.loads(simctl("list", "devices", "-j"))["devices"]
-for runtime_devices in devices.values():
-    for device in runtime_devices:
-        if device["name"] == name and device.get("isAvailable", True):
-            print(device["udid"] + ":" + device.get("state", "Shutdown"))
-            sys.exit(0)
-
-if mode == "find":
-    print("NOTFOUND")
-    sys.exit(0)
-
 runtimes = [
     r
     for r in json.loads(simctl("list", "runtimes", "-j"))["runtimes"]
@@ -368,13 +400,13 @@ if not runtimes:
 runtimes.sort(key=lambda r: [int(x) for x in r["version"].split(".")])
 runtime = runtimes[-1]
 
+device_types = json.loads(simctl("list", "devicetypes", "-j"))["devicetypes"]
 if not device_type:
     # Pick the newest iPhone the chosen runtime actually supports, using the
     # hardware model identifier (e.g. "iPhone18,1") as the recency key --
     # neither simctl list is ordered chronologically. The iPod touch reports
     # the iPhone product family but is incompatible with modern runtimes.
     supported = {d["identifier"] for d in runtime.get("supportedDeviceTypes", [])}
-    device_types = json.loads(simctl("list", "devicetypes", "-j"))["devicetypes"]
 
     def model_key(d):
         model = d.get("modelIdentifier", "")
@@ -395,6 +427,56 @@ if not device_type:
     if not iphones:
         sys.exit("error: no iPhone device types supported by runtime %s" % runtime["identifier"])
     device_type = max(iphones, key=model_key)["name"]
+
+expected_dt = next(
+    (
+        d["identifier"]
+        for d in device_types
+        if d["name"] == device_type or d["identifier"] == device_type
+    ),
+    None,
+)
+
+# Reuse an existing simulator only if its SUBSTANCE matches the resolved
+# intent (runtime + device type), not just its name: with default
+# device/os, "latest" drifts across Xcode upgrades and a stale simulator
+# would otherwise be reused forever. We hold this slot's flock, so stale
+# and duplicate-name devices are safe to delete here.
+devices = json.loads(simctl("list", "devices", "-j"))["devices"]
+matches = [
+    (runtime_id, device)
+    for runtime_id, runtime_devices in devices.items()
+    for device in runtime_devices
+    if device["name"] == name
+]
+good = [
+    device
+    for runtime_id, device in matches
+    if device.get("isAvailable", True)
+    and runtime_id == runtime["identifier"]
+    and (expected_dt is None or device.get("deviceTypeIdentifier") == expected_dt)
+]
+for _, device in matches:
+    if good and device is good[0]:
+        continue
+    subprocess.run(["xcrun", "simctl", "shutdown", device["udid"]], capture_output=True)
+    subprocess.run(["xcrun", "simctl", "delete", device["udid"]], capture_output=True)
+    print(
+        "note: removed simulator %s (%s): device/runtime did not match the request"
+        % (name, device["udid"]),
+        file=sys.stderr,
+    )
+
+if good:
+    if mode == "find":
+        print(good[0]["udid"] + ":" + good[0].get("state", "Shutdown"))
+    else:
+        print("CREATED:" + good[0]["udid"])
+    sys.exit(0)
+
+if mode == "find":
+    print("NOTFOUND")
+    sys.exit(0)
 
 print("CREATED:" + simctl("create", name, device_type, runtime["identifier"]).strip())
 PYEOF
@@ -450,22 +532,33 @@ PYEOF
       echo "note: ignoring non-zero 'simctl bootstatus' exit code" >&2
     fi
 
-    # A simulator's very first boot finishes data migration slightly before
-    # SpringBoard can actually launch apps; give a freshly created device a
-    # few seconds to settle to avoid a first-run launch race.
-    if [[ "$simulator_was_created" == true ]]; then
-      echo "note: freshly created simulator; waiting for SpringBoard to settle" >&2
-      sleep 10
-    fi
-
-    # Release the boot slot; the pool slot lock (fd 200) stays held.
+    # Release the boot slot; the pool slot lock (fd 200) stays held. The
+    # readiness wait below intentionally happens after the release: it is
+    # not boot work and must not throttle other actions' boots.
     exec 201>&-
+
+    # Wait until the simulator can actually run apps, re-booting once if it
+    # never gets there (bootstatus tolerates failed boots; see helper).
+    if ! wait_for_springboard "$simulator_id"; then
+      echo "note: simulator not ready after boot; re-booting it once" >&2
+      xcrun simctl shutdown "$simulator_id" >&2 || true
+      xcrun simctl bootstatus "$simulator_id" -b >&2 || true
+      wait_for_springboard "$simulator_id" \
+        || echo "note: simulator still not ready; proceeding, idb will surface errors" >&2
+    fi
+    # Short settle: SpringBoard being up still slightly precedes launch
+    # readiness on a loaded machine.
+    sleep 2
   fi
 fi
 
-# Run a pre-action binary, if provided.
+simulator_ms=$(( $(now_ms) - stage_start_ms - stage_ms ))
+
+# Run a pre-action binary, if provided. The pool/boot-gate lock fds are
+# closed for it (and every other spawned process): a child that outlives
+# this shell would otherwise keep the slot lock alive.
 SIMULATOR_UDID="$simulator_id" \
-  "$pre_action_binary"
+  "$pre_action_binary" 200>&- 201>&-
 
 # Run a dedicated idb_companion for this test action, on a private unix
 # socket. A shared, long-lived companion is not safe here: it installs local
@@ -475,7 +568,7 @@ SIMULATOR_UDID="$simulator_id" \
 # resolve stale or wrong bundles. A per-action companion also avoids races
 # on the idb client's shared companion registry when Bazel runs tests
 # concurrently.
-real_home=$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+real_home=$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed 's/^NFSHomeDirectory: //')
 idb_bundle_storage="${real_home:-$HOME}/Library/Developer/CoreSimulator/Devices/$simulator_id/data/fbsimulatorcontrol/idb-test-bundles/$test_bundle_id"
 rm -rf "$idb_bundle_storage"
 
@@ -484,25 +577,45 @@ rm -rf "$idb_bundle_storage"
 companion_sock_dir="$(mktemp -d "/tmp/rules_idb.XXXXXX")"
 companion_sock="$companion_sock_dir/c.sock"
 companion_log="$test_tmp_dir/companion.log"
-"$companion_bin" --udid "$simulator_id" --grpc-domain-sock "$companion_sock" > "$companion_log" 2>&1 &
-companion_pid=$!
 
-companion_ready=false
-for _ in $(seq 1 150); do
-  if [[ -S "$companion_sock" ]]; then
-    companion_ready=true
-    break
+kill_companion() {
+  [[ -n "$companion_pid" ]] || return 0
+  kill "$companion_pid" 2>/dev/null || true
+  # The companion's gRPC server can ignore SIGTERM; make sure it dies.
+  for _ in 1 2 3 4 5; do
+    kill -0 "$companion_pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  kill -9 "$companion_pid" 2>/dev/null || true
+  companion_pid=""
+}
+
+spawn_companion() {
+  companion_start_ms=$(now_ms)
+  rm -f "$companion_sock"
+  "$companion_bin" --udid "$simulator_id" --grpc-domain-sock "$companion_sock" >> "$companion_log" 2>&1 200>&- 201>&- &
+  companion_pid=$!
+
+  companion_ready=false
+  for _ in $(seq 1 600); do
+    if [[ -S "$companion_sock" ]]; then
+      companion_ready=true
+      break
+    fi
+    if ! kill -0 "$companion_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "$companion_ready" != true ]]; then
+    echo "error: idb_companion failed to start; log follows" >&2
+    cat "$companion_log" >&2
+    exit 1
   fi
-  if ! kill -0 "$companion_pid" 2>/dev/null; then
-    break
-  fi
-  sleep 0.2
-done
-if [[ "$companion_ready" != true ]]; then
-  echo "error: idb_companion failed to start; log follows" >&2
-  cat "$companion_log" >&2
-  exit 1
-fi
+  companion_ms=$(( $(now_ms) - companion_start_ms ))
+}
+
+spawn_companion
 
 # ---------------------------------------------------------------------------
 # Forward the Bazel test environment into the hosted test process. The idb
@@ -535,10 +648,12 @@ done
 
 saved_IFS=$IFS
 IFS=","
+set -f  # values may contain glob characters; splitting must not expand them
 for test_env_key_value in ${test_env}; do
   IFS="=" read -r key value <<< "$test_env_key_value"
   [[ -n "$key" ]] && sanitize_and_export "$key" "$value"
 done
+set +f
 IFS=$saved_IFS
 
 # Random test ordering: the (patched) companion reads this key out of the
@@ -586,6 +701,7 @@ skip_tests=()
 if [[ -n "$all_filters" ]]; then
   saved_IFS=$IFS
   IFS=","
+  set -f
   for filter in $all_filters; do
     if [[ "$filter" == -* ]]; then
       skip_tests+=("${filter:1}")
@@ -593,6 +709,7 @@ if [[ -n "$all_filters" ]]; then
       only_tests+=("$filter")
     fi
   done
+  set +f
   IFS=$saved_IFS
 fi
 
@@ -660,18 +777,21 @@ if [[ ${#command_line_args[@]} -gt 0 ]]; then
   idb_cmd+=("${command_line_args[@]}")
 fi
 
-"${idb_cmd[@]}" 2>&1 | tee -i "$testlog" || test_exit_code=$?
-
-# ---------------------------------------------------------------------------
-# Interpret the structured (json-lines) idb output: compute the verdict,
-# print a summary, and emit a JUnit XML report for Bazel.
+# Run idb and interpret its structured (json-lines) output: compute the
+# verdict, print a summary, and emit a JUnit XML report for Bazel.
 #
 # The idb client exits 0 even when test cases fail (it only exits non-zero
 # for infrastructure errors or crashes outside of test cases), so the log is
 # the source of truth for pass/fail.
-# ---------------------------------------------------------------------------
-parse_exit_code=0
-"$python_bin" - "$testlog" "${XML_OUTPUT_FILE:-}" "$test_bundle_name" <<'PYEOF' || parse_exit_code=$?
+run_idb_once() {
+  test_exit_code=0
+  idb_start_ms=$(now_ms)
+  "${idb_cmd[@]}" 2>&1 200>&- | tee -i "$testlog" || test_exit_code=$?
+  idb_ms=$(( $(now_ms) - idb_start_ms ))
+  idb_exit_code=$test_exit_code
+
+  parse_exit_code=0
+  "$python_bin" - "$testlog" "${XML_OUTPUT_FILE:-}" "$test_bundle_name" <<'PYEOF' || parse_exit_code=$?
 import json, sys
 from xml.sax.saxutils import escape
 
@@ -696,9 +816,9 @@ failures = [r for r in records if not r.get("passed", False)]
 if xml_output_file:
     cases = []
     for r in records:
-        name = escape(r.get("methodName", "unknown"))
-        classname = escape(r.get("className", bundle_name))
-        duration = r.get("duration", 0.0)
+        name = escape(r.get("methodName", "unknown"), {'"': "&quot;"})
+        classname = escape(r.get("className", bundle_name), {'"': "&quot;"})
+        duration = float(r.get("duration") or 0.0)
         body = ""
         if not r.get("passed", False):
             info = r.get("failureInfo") or {}
@@ -725,7 +845,12 @@ if xml_output_file:
         f.write(xml)
 
 print("")
-print("note: executed %d tests, %d failed" % (executed, len(failures)), file=sys.stderr)
+reported_s = sum(r.get("duration", 0.0) for r in records)
+print(
+    "note: executed %d tests, %d failed (%.1fs in-simulator)"
+    % (executed, len(failures), reported_s),
+    file=sys.stderr,
+)
 for r in failures:
     info = r.get("failureInfo") or {}
     print(
@@ -739,6 +864,29 @@ if failures:
 if executed == 0:
     sys.exit(71)
 PYEOF
+}
+
+run_idb_once
+
+# One retry on the infrastructure-failure signature -- idb itself failed and
+# not a single test record came back (a mid-boot or wedged simulator, not a
+# test failure). Give the simulator a clean boot and a fresh companion.
+# Only for pool simulators; custom-provisioned ones are not ours to re-boot.
+if [[ "$idb_exit_code" -ne 0 && "$parse_exit_code" -eq 71 && -n "${acquired_slot:-}" ]]; then
+  echo "note: infrastructure failure (idb exited $idb_exit_code with no test results); re-booting the simulator and retrying once" >&2
+  kill_companion
+  xcrun simctl shutdown "$simulator_id" >&2 || true
+  xcrun simctl bootstatus "$simulator_id" -b >&2 || true
+  wait_for_springboard "$simulator_id" || true
+  sleep 2
+  spawn_companion
+  run_idb_once
+fi
+
+# Phase timing summary. "idb" covers bundle install plus test execution;
+# subtract the in-simulator test time reported above to estimate install
+# and session-setup overhead.
+echo "note: timing stage=$(fmt_ms "$stage_ms") simulator=$(fmt_ms "$simulator_ms") companion=$(fmt_ms "$companion_ms") idb=$(fmt_ms "$idb_ms") total=$(fmt_ms $(( $(now_ms) - runner_start_ms )))" >&2
 
 if [[ "$parse_exit_code" -eq 70 ]]; then
   echo "error: some tests failed" >&2
@@ -762,6 +910,16 @@ if [[ "$test_exit_code" -eq 0 ]] && grep -q \
   test_exit_code=1
 fi
 
+# Infrastructure-failure recovery: idb itself failed and not a single test
+# record came back. A wedged simulator that still reports "Booted" produces
+# exactly this signature on every subsequent run; shut it down so the next
+# action on this slot gets a fresh boot instead of inheriting the wedge.
+if [[ "$idb_exit_code" -ne 0 && "$parse_exit_code" -eq 71 && -n "${acquired_slot:-}" ]]; then
+  echo "note: infrastructure failure (idb exited $idb_exit_code with no test results);" >&2
+  echo "note: shutting simulator $simulator_id down for a clean boot on the next run" >&2
+  xcrun simctl shutdown "$simulator_id" >&2 || true
+fi
+
 # ---------------------------------------------------------------------------
 # Coverage: merge the pulled .profraw files and export an lcov report to
 # where Bazel expects it. Ported from rules_apple's xctestrun runner.
@@ -775,8 +933,10 @@ if [[ "$collect_coverage" == true ]]; then
     test_exit_code=1
   else
     readonly profdata="$test_tmp_dir/coverage.profdata"
-    find "$coverage_dir" -name "*.profraw" -print0 \
-      | xargs -0 xcrun llvm-profdata merge --output "$profdata"
+    # A file list instead of xargs: batch splitting near ARG_MAX would run
+    # multiple merges that silently overwrite each other's output.
+    find "$coverage_dir" -name "*.profraw" > "$test_tmp_dir/profraw.list"
+    xcrun llvm-profdata merge -f "$test_tmp_dir/profraw.list" --output "$profdata"
 
     if [[ "${COLLECT_PROFDATA:-0}" == "1" && -n "${TEST_UNDECLARED_OUTPUTS_DIR:-}" ]]; then
       cp "$profdata" "$TEST_UNDECLARED_OUTPUTS_DIR"
@@ -827,6 +987,7 @@ if [[ "$collect_coverage" == true ]]; then
     if [[ -s "$error_file" || "$llvm_cov_status" -ne 0 ]]; then
       echo "error: while exporting coverage report" >&2
       cat "$error_file" >&2
+      [[ "$llvm_cov_status" -ne 0 ]] || llvm_cov_status=1
     fi
 
     if [[ -n "${COVERAGE_PRODUCE_JSON:-}" ]]; then
@@ -841,6 +1002,7 @@ if [[ "$collect_coverage" == true ]]; then
       if [[ -s "$error_file" || "$llvm_cov_json_export_status" -ne 0 ]]; then
         echo "error: while exporting json coverage report" >&2
         cat "$error_file" >&2
+        [[ "$llvm_cov_json_export_status" -ne 0 ]] || llvm_cov_json_export_status=1
       fi
     fi
   fi
@@ -857,11 +1019,11 @@ TEST_EXIT_CODE=$test_exit_code \
   SIMULATOR_UDID="$simulator_id" \
   LLVM_COV_EXIT_CODE="$llvm_cov_status" \
   LLVM_COV_JSON_EXPORT_EXIT_CODE="$llvm_cov_json_export_status" \
-  "$post_action_binary" || post_action_exit_code=$?
+  "$post_action_binary" 200>&- 201>&- || post_action_exit_code=$?
 
 if [[ -n "$clean_up_simulator_action_binary" ]]; then
   SIMULATOR_UDID="$simulator_id" SIMULATOR_REUSE_SIMULATOR="${reuse_simulator:-}" \
-    "$clean_up_simulator_action_binary" || true
+    "$clean_up_simulator_action_binary" 200>&- 201>&- || true
 elif [[ "$shutdown_after_test" == true || -n "${RULES_IDB_SHUTDOWN_SIMULATOR:-}" ]]; then
   xcrun simctl shutdown "$simulator_id" >&2 || true
 elif [[ -n "${acquired_slot:-}" && "$acquired_slot" -ge "$warm_pool_size" ]]; then

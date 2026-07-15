@@ -12,7 +12,10 @@ on:
 
 jobs:
   publish:
-    uses: bazel-contrib/publish-to-bcr/.github/workflows/publish.yaml@main
+    # Pinned to a commit: this reusable workflow receives BCR_PUBLISH_TOKEN,
+    # so tracking a mutable ref would let an upstream compromise exfiltrate
+    # it. Bump deliberately.
+    uses: bazel-contrib/publish-to-bcr/.github/workflows/publish.yaml@ad6879fd015a01c3e3b1b318fe3c061f928ac2fb # 2026-07-07
     with:
       tag_name: ${{ github.event.release.tag_name || inputs.tag_name }}
       registry_fork: erneestoc/bazel-central-registry
