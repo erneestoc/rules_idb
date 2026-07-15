@@ -15,6 +15,16 @@ alias(
     }),
 )
 
+# The full runtime tree; declared as test runfiles so remote executors
+# materialize the stdlib, not just the interpreter binary.
+alias(
+    name = "client_python_files",
+    actual = select({
+        "@platforms//cpu:arm64": "@python_3_12_aarch64-apple-darwin//:files",
+        "@platforms//cpu:x86_64": "@python_3_12_x86_64-apple-darwin//:files",
+    }),
+)
+
 exports_files([
     "idb_test_runner.template.sh",
 ])

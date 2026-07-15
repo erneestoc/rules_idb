@@ -53,7 +53,15 @@ def simctl(*a, **kw):
 
 def pool_key(device_type, os_version):
     raw = "%s_%s" % (device_type or "default", os_version or "latest")
-    return re.sub(r"[^A-Za-z0-9._-]", "-", raw)
+    key = re.sub(r"[^A-Za-z0-9._-]", "-", raw)
+    # Mirrors the runner: a custom pool root namespaces its simulators.
+    root = os.environ.get("RULES_IDB_POOL_DIR")
+    if root:
+        crc = subprocess.run(
+            ["/usr/bin/cksum"], input=root, capture_output=True, text=True
+        ).stdout.split()[0]
+        key = "%s.r%s" % (key, crc)
+    return key
 
 
 def pool_dir(key):

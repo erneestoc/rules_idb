@@ -153,3 +153,35 @@ Known, deliberately deferred:
   --flaky_test_attempts; the real fix is an upstream companion patch
   treating "found nothing to terminate" (NSPOSIXErrorDomain code 3) as
   benign during launch.
+
+## Follow-up session (2026-07-14, later still): apples-to-apples + parity
+
+* **Apples-to-apples benchmark**: built the hand-rolled pooled
+  simulator_creator for the stock runner (examples/hooks/flock_simulator_*,
+  PID lockfiles + stale stealing, XCTESTRUN_RUNNER_PID liveness). Stock
+  runner then passes all concurrency scenarios; idb keeps 1.6-2.6x memory,
+  4-7x CPU, and 3x wall at 8-way (13-15s xcodebuild session overhead per
+  action under load). Scenarios are permanent in run_benchmark.sh
+  (*_xcb_pooled); RESULTS.md has the fair tables.
+* **Test sharding implemented** (shard_count, hosted+logic): touch
+  TEST_SHARD_STATUS_FILE, `xctest install` + `xctest list-bundle --json`
+  through the per-action companion, deterministic interleaved slice,
+  --test_filter composes, empty shards pass with 0-test XML. UI tests
+  error. Gotcha found while testing: `while read` drops a final
+  unterminated line — every shard silently lost its last test until the
+  loop got `|| [[ -n "$line" ]]`. validate.sh asserts 15/15 exactly-once.
+* **Swift Testing verified**: @Test suites execute under idb (hosted),
+  per-test records, failures fail the target with the #expect message.
+  Stock runner also runs them (its own ◇/✔ reporter; XCTest counter says 0).
+  validate.sh covers pass+fail cases.
+* **XCTSkip verified**: skip does not fail the run; reported as passed
+  (protocol has no SKIPPED status) — documented in README.
+* Remaining review items closed: RBE stdlib runfiles (//idb:client_python_files
+  select over the darwin repos' :files), attr injection validation +
+  negative-int checks in the rule, arm64-only fail-fast, bootstatus
+  watchdog under the boot gate, companion killed before warm-residue
+  shutdown, dangling idb-test-bundles sweep (dangling symlinks broke the
+  companion's bundle enumeration), pool-root cksum namespacing when
+  RULES_IDB_POOL_DIR is set (mirrored in preboot), CI leg exercising the
+  released companion artifact (continue-on-error), new coverage targets in
+  the CI matrix.

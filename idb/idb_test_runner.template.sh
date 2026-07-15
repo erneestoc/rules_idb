@@ -147,6 +147,13 @@ if ! command -v "$companion_bin" >/dev/null 2>&1; then
   echo "error: 'idb_companion' not found at '$companion_bin'." >&2
   exit 1
 fi
+# The prebuilt companion ships arm64-only; fail with a real message instead
+# of a "Bad CPU type" from deep inside the run.
+if [[ "$(uname -m)" == "x86_64" ]] && ! file "$companion_bin" 2>/dev/null | grep -q x86_64; then
+  echo "error: the bundled idb_companion is arm64-only and this is an x86_64 host." >&2
+  echo "error: build the companion locally (docs/BUILDING_IDB.md) and set RULES_IDB_COMPANION_PATH." >&2
+  exit 1
+fi
 
 command_line_args=()
 while [[ $# -gt 0 ]]; do
@@ -342,6 +349,13 @@ else
   # all the same simulator. The Darwin per-user temp dir is stable.
   pool_root="${RULES_IDB_POOL_DIR:-$(getconf DARWIN_USER_TEMP_DIR)rules_idb_pool}"
   pool_key=$(printf '%s' "${device_type:-default}_${os_version:-latest}" | tr -c 'A-Za-z0-9._-' '-')
+  # A custom pool root gets its own simulator namespace: otherwise two
+  # invocations with different roots would hold "slot 0" under different
+  # locks yet drive the same simulator. Tools must be run with the same
+  # RULES_IDB_POOL_DIR to see these pools.
+  if [[ -n "${RULES_IDB_POOL_DIR:-}" ]]; then
+    pool_key="$pool_key.r$(printf '%s' "$pool_root" | /usr/bin/cksum | cut -d' ' -f1)"
+  fi
   pool_dir="$pool_root/$pool_key"
   mkdir -p "$pool_dir"
 
@@ -524,13 +538,24 @@ PYEOF
       echo "note: created simulator '$simulator_name' ($simulator_id)" >&2
     fi
 
-    # Boot the simulator and wait until it is usable.
-    if ! xcrun simctl bootstatus "$simulator_id" -b >&2; then
-      # Exit code 149 means "already booted"; other states are tolerated the
-      # same way rules_apple's simulator_creator does -- idb will surface
-      # real errors.
-      echo "note: ignoring non-zero 'simctl bootstatus' exit code" >&2
+    # Boot the simulator and wait until it is usable, with a deadline: a
+    # wedged boot would otherwise hold this machine-wide boot-gate slot
+    # forever ('bootstatus -b' has no timeout of its own). Non-zero exits
+    # are tolerated the same way rules_apple's simulator_creator does (149
+    # means "already booted"); the readiness check below is authoritative.
+    boot_wait_secs="${RULES_IDB_BOOT_TIMEOUT:-240}"
+    xcrun simctl bootstatus "$simulator_id" -b >&2 200>&- 201>&- &
+    bootstatus_pid=$!
+    for (( i = 0; i < boot_wait_secs * 2; i++ )); do
+      kill -0 "$bootstatus_pid" 2>/dev/null || break
+      sleep 0.5
+    done
+    if kill -0 "$bootstatus_pid" 2>/dev/null; then
+      echo "note: boot still pending after ${boot_wait_secs}s; abandoning the wait" >&2
+      kill -9 "$bootstatus_pid" 2>/dev/null || true
     fi
+    wait "$bootstatus_pid" 2>/dev/null \
+      || echo "note: ignoring non-zero 'simctl bootstatus' exit code" >&2
 
     # Release the boot slot; the pool slot lock (fd 200) stays held. The
     # readiness wait below intentionally happens after the release: it is
@@ -569,8 +594,16 @@ SIMULATOR_UDID="$simulator_id" \
 # on the idb client's shared companion registry when Bazel runs tests
 # concurrently.
 real_home=$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed 's/^NFSHomeDirectory: //')
-idb_bundle_storage="${real_home:-$HOME}/Library/Developer/CoreSimulator/Devices/$simulator_id/data/fbsimulatorcontrol/idb-test-bundles/$test_bundle_id"
-rm -rf "$idb_bundle_storage"
+idb_bundle_root="${real_home:-$HOME}/Library/Developer/CoreSimulator/Devices/$simulator_id/data/fbsimulatorcontrol/idb-test-bundles"
+rm -rf "$idb_bundle_root/$test_bundle_id"
+# The companion installs bundles as symlinks to staging dirs that die with
+# their test action; the dangling leftovers make its bundle enumeration
+# (used by test listing / sharding) fail. Sweep them.
+for stale_bundle in "$idb_bundle_root"/*/*.xctest; do
+  if [[ -L "$stale_bundle" && ! -e "$stale_bundle" ]]; then
+    rm -rf "$(dirname "$stale_bundle")"
+  fi
+done
 
 # The socket must live at a short path: unix domain socket paths are limited
 # to ~104 bytes on macOS and Bazel's TEST_TMPDIR is far longer than that.
@@ -711,6 +744,65 @@ if [[ -n "$all_filters" ]]; then
   done
   set +f
   IFS=$saved_IFS
+fi
+
+# ---------------------------------------------------------------------------
+# Bazel test sharding: list the bundle's tests through the companion and run
+# this shard's deterministic slice (interleaved over the sorted list). A
+# user --test_filter is applied to the list first so filters and shards
+# compose the way Bazel expects.
+# ---------------------------------------------------------------------------
+if [[ "${TEST_TOTAL_SHARDS:-1}" -gt 1 ]]; then
+  if [[ "$is_ui_test" == true ]]; then
+    echo "error: shard_count > 1 is not supported for UI tests" >&2
+    exit 1
+  fi
+  # Tell Bazel this runner implements sharding.
+  if [[ -n "${TEST_SHARD_STATUS_FILE:-}" ]]; then
+    touch "$TEST_SHARD_STATUS_FILE"
+  fi
+  "$idb_bin" --companion "$companion_sock" xctest install "$test_bundle_dir" >&2
+  "$idb_bin" --companion "$companion_sock" xctest list-bundle "$test_bundle_id" --json \
+    > "$test_tmp_dir/all_tests.json"
+  printf '%s\n' "${only_tests[@]:-}" > "$test_tmp_dir/user_filters.txt"
+  "$python_bin" - "$test_tmp_dir/all_tests.json" "${TEST_TOTAL_SHARDS}" \
+    "${TEST_SHARD_INDEX:-0}" "$test_tmp_dir/user_filters.txt" \
+    > "$test_tmp_dir/shard_tests.txt" <<'PYEOF'
+import json, sys
+
+names = sorted(json.load(open(sys.argv[1])))
+total, index = int(sys.argv[2]), int(sys.argv[3])
+only = [f for f in open(sys.argv[4]).read().splitlines() if f]
+
+def matches(name):
+    if not only:
+        return True
+    # Listed names are "Module.Class/method"; user filters usually omit
+    # the module.
+    return name in only or name.split(".", 1)[-1] in only
+
+picked = [n for n in names if matches(n)]
+for i, n in enumerate(picked):
+    if i % total == index:
+        print(n)
+PYEOF
+  only_tests=()
+  # `|| [[ -n ... ]]` keeps a final line that lacks a trailing newline.
+  while IFS= read -r shard_test || [[ -n "$shard_test" ]]; do
+    [[ -n "$shard_test" ]] && only_tests+=("$shard_test")
+  done < "$test_tmp_dir/shard_tests.txt"
+  echo "note: shard $(( ${TEST_SHARD_INDEX:-0} + 1 ))/${TEST_TOTAL_SHARDS} runs ${#only_tests[@]} tests" >&2
+  if [[ ${#only_tests[@]} -eq 0 ]]; then
+    # More shards than (filtered) tests: an empty shard passes with 0 tests.
+    if [[ -n "${XML_OUTPUT_FILE:-}" ]]; then
+      printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites>\n  <testsuite name="%s" tests="0" failures="0"/>\n</testsuites>\n' \
+        "$test_bundle_name" > "$XML_OUTPUT_FILE"
+    fi
+    if [[ -f "${TEST_PREMATURE_EXIT_FILE:-}" ]]; then
+      rm -f "$TEST_PREMATURE_EXIT_FILE"
+    fi
+    exit 0
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -1020,6 +1112,10 @@ TEST_EXIT_CODE=$test_exit_code \
   LLVM_COV_EXIT_CODE="$llvm_cov_status" \
   LLVM_COV_JSON_EXPORT_EXIT_CODE="$llvm_cov_json_export_status" \
   "$post_action_binary" 200>&- 201>&- || post_action_exit_code=$?
+
+# The companion dies before any simulator shutdown below so it never
+# observes (and logs errors about) its device disappearing under it.
+kill_companion
 
 if [[ -n "$clean_up_simulator_action_binary" ]]; then
   SIMULATOR_UDID="$simulator_id" SIMULATOR_REUSE_SIMULATOR="${reuse_simulator:-}" \

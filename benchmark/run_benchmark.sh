@@ -111,12 +111,19 @@ IDB_SHARDS_8=("${IDB_SHARDS_4[@]}" //examples:HostedTestsShard5 //examples:Hoste
 XC_SHARDS_8=("${XC_SHARDS_4[@]}" //examples:HostedTestsShard5_xcodebuild
   //examples:HostedTestsShard6_xcodebuild //examples:HostedTestsShard7_xcodebuild
   //examples:HostedTestsShard8_xcodebuild)
+# Stock runner + hand-rolled pooled simulator_creator: the apples-to-apples
+# concurrency comparison (the stock default simply fails at jobs>1).
+XCB_POOLED_4=(//examples:HostedTestsShard1_xcb_pooled //examples:HostedTestsShard2_xcb_pooled
+  //examples:HostedTestsShard3_xcb_pooled //examples:HostedTestsShard4_xcb_pooled)
+XCB_POOLED_8=("${XCB_POOLED_4[@]}" //examples:HostedTestsShard5_xcb_pooled
+  //examples:HostedTestsShard6_xcb_pooled //examples:HostedTestsShard7_xcb_pooled
+  //examples:HostedTestsShard8_xcb_pooled)
 
 echo "Building all test targets once so measured runs are pure test execution..."
 bazel build \
   //examples:HostedTests //examples:HostedTests_xcodebuild \
   //examples:HostedTestsBig //examples:HostedTestsBig_xcodebuild \
-  "${IDB_SHARDS_8[@]}" "${XC_SHARDS_8[@]}"
+  "${IDB_SHARDS_8[@]}" "${XC_SHARDS_8[@]}" "${XCB_POOLED_8[@]}"
 
 # --- warm single-target latency --------------------------------------------
 run_scenario single_idb warmup 1 //examples:HostedTests
@@ -148,17 +155,23 @@ run_scenario concurrent8_idb warmup 1 --local_test_jobs=8 \
   --test_env=RULES_IDB_WARM_POOL_SIZE=8 "${IDB_SHARDS_8[@]}"
 run_scenario concurrent8_xcodebuild warmup 1 --local_test_jobs=8 "${XC_SHARDS_8[@]}"
 
+run_scenario concurrent4_xcb_pooled warmup 1 --local_test_jobs=4 "${XCB_POOLED_4[@]}"
+run_scenario concurrent8_xcb_pooled warmup 1 --local_test_jobs=8 "${XCB_POOLED_8[@]}"
+
 # --- --runs_per_test stress (12 actions over 8 slots) -----------------------
 run_scenario repeat12_idb warmup 1 --local_test_jobs=8 --runs_per_test=3 \
   --test_env=RULES_IDB_WARM_POOL_SIZE=8 "${IDB_SHARDS_4[@]}"
 run_scenario repeat12_xcodebuild warmup 1 --local_test_jobs=8 --runs_per_test=3 \
   "${XC_SHARDS_4[@]}"
+run_scenario repeat12_xcb_pooled warmup 1 --local_test_jobs=8 --runs_per_test=3 \
+  "${XCB_POOLED_4[@]}"
 
 # --- warm-residue thrash: repeated wide runs, default cap vs full cap -------
 run_scenario sustained3x8_idb_warm4 warmup 3 --local_test_jobs=8 \
   --test_env=RULES_IDB_WARM_POOL_SIZE=4 "${IDB_SHARDS_8[@]}"
 run_scenario sustained3x8_idb_warm8 warmup 3 --local_test_jobs=8 \
   --test_env=RULES_IDB_WARM_POOL_SIZE=8 "${IDB_SHARDS_8[@]}"
+run_scenario sustained3x8_xcb_pooled warmup 3 --local_test_jobs=8 "${XCB_POOLED_8[@]}"
 
 echo
 echo "=== overall summary ==="

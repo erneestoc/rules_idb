@@ -119,6 +119,8 @@ jobs:
           bazelisk test \
             //examples:LogicTests //examples:HostedTests //examples:UITests \
             //examples:HostedTestsRandom //examples:HostedTestsHooks \
+            //examples:SwiftTestingTests //examples:SkippingTests \
+            //examples:HostedTestsSharded \
             --local_test_jobs=1 \
             --test_output=errors
 
@@ -127,3 +129,29 @@ jobs:
         env:
           RULES_IDB_COMPANION_DIST_URL: file://${{ github.workspace }}/idb-companion-dist.tar.gz
         run: ./tests/validate.sh
+
+  # Consumers fetch the companion from the pinned GitHub release
+  # (idb/extensions.bzl), not from CI's freshly built artifact -- exercise
+  # that real path too. Informational: a commit that requires a newer
+  # companion than the released one is legitimate mid-release (RELEASING.md).
+  test-released-companion:
+    runs-on: macos-26
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | grep -v beta | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Pre-boot simulator
+        run: bazelisk run //tools:preboot -- 1 --device "iPhone 17 Pro"
+
+      - name: Run example test suite against the released companion
+        run: |
+          bazelisk test \
+            //examples:LogicTests //examples:HostedTests \
+            --local_test_jobs=1 \
+            --test_output=errors

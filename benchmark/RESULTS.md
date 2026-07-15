@@ -39,6 +39,18 @@ inferred from XCTest's own suite summary (wall − in-simulator = provisioning
 | 8 targets × 3 consecutive passes (warm cap ≥ jobs) | **9s / 9s / 9s, all pass** | n/a (fails at jobs=8) |
 | same, warm cap 4 < jobs 8 (misconfigured) | 52s / 48s / 54s, all pass | n/a |
 
+**Apples-to-apples**: the same scenarios against the stock runner fitted
+with a hand-rolled pooled `simulator_creator` + lock cleanup
+(`examples/hooks/flock_simulator_creator.sh`, PID lockfiles with stale-lock
+stealing — the pattern teams write today to make `--local_test_jobs` work):
+
+| Scenario | idb | xcodebuild + hand-rolled pool |
+| --- | --- | --- |
+| 4 targets, jobs=4 | 6s, 4/4 | **5s, 4/4** |
+| 8 targets, jobs=8 | **6s, 8/8** | 19s, 8/8 (13–15s session overhead per action) |
+| 12 actions (`--runs_per_test=3`) | **11s, 12/12** | 15s, 12/12 |
+| 8-wide × 3 passes | **9s / 9s / 9s** | 12s / 10s / 11s |
+
 ## Harness memory and CPU
 
 | Scenario | Runner | Peak RSS | Mean active RSS | Max procs | CPU |
@@ -52,6 +64,19 @@ inferred from XCTest's own suite summary (wall − in-simulator = provisioning
 | 12 actions (`--runs_per_test`) | **idb** | **711 MiB** | 355 MiB | 18 | **3.7 s** |
 | 12 actions (`--runs_per_test`) | xcodebuild | 7256 MiB | 1902 MiB | 44 | 32.8 s |
 
+With the hand-rolled pool (all green, so these are the fair rows):
+
+| Scenario | Runner | Peak RSS | Mean active RSS | CPU |
+| --- | --- | --- | --- | --- |
+| 4 targets, jobs=4 | **idb** | **367 MiB** | 235 MiB | **1.2 s** |
+| 4 targets, jobs=4 | xcodebuild pooled | 931 MiB | 756 MiB | 5.2 s |
+| 8 targets, jobs=8 | **idb** | **711 MiB** | 430 MiB | **2.5 s** |
+| 8 targets, jobs=8 | xcodebuild pooled | 1163 MiB | 845 MiB | 17.6 s |
+| 12 actions (`--runs_per_test`) | **idb** | **711 MiB** | 355 MiB | **3.7 s** |
+| 12 actions (`--runs_per_test`) | xcodebuild pooled | 1830 MiB | 1167 MiB | 20.0 s |
+| 8-wide × 3 passes | **idb** | **710 MiB** | 437 MiB | **8.6 s** |
+| 8-wide × 3 passes | xcodebuild pooled | 1845 MiB | 1242 MiB | 51.5 s |
+
 ## Findings
 
 1. **Concurrency is the headline, and it holds at 8-way.** The stock runner
@@ -63,6 +88,16 @@ inferred from XCTest's own suite summary (wall − in-simulator = provisioning
    ~330–430 MiB (xcodebuild), so the same memory budget drives roughly
    **4× more simulators**; the `--runs_per_test` stress peaked at 7.3 GB of
    xcodebuild harness vs 0.7 GB for idb.
+
+1a. **Even against a hand-rolled pool, idb keeps the resource win.** With
+   the flock/PID `simulator_creator` fitted (the fair comparison), the
+   stock runner passes everything, and its 4-way wall is on par — but at
+   8-way each xcodebuild action pays 13–15s of session overhead (19s vs 6s
+   total), and across the sustained matrix the xcodebuild harness uses
+   **~1.6–2.6× the memory and 4–7× the CPU**. And the hand-rolled pool is
+   exactly the machinery rules_idb makes unnecessary: PID lockfiles with
+   stale-lock stealing vs kernel-released flocks, no boot gating, no warm
+   trimming, no runtime/device-type verification, no readiness retry.
 
 2. **Harness CPU is 4–14× lower.** 0.3 vs 1.2 CPU-s on a single warm target,
    2.5 vs 35.4 CPU-s at 8-way. On CI hosts running many simulators, the

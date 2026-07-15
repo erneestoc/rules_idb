@@ -241,4 +241,16 @@ run phase.
 * Device (non-simulator) testing is out of scope.
 * xcresult bundles are not produced; the runner emits JUnit XML and idb log
   output instead.
-* x86_64 test bundles on arm64 hosts (Rosetta) are untested.
+* x86_64 test bundles on arm64 hosts (Rosetta) are untested, and the
+  bundled companion is arm64-only (the runner fails fast with instructions
+  on x86_64 hosts).
+* `XCTSkip`-ped tests do not fail the run, but are reported as passed
+  rather than skipped (the idb protocol has no skipped status yet).
+* `shard_count` is supported for hosted and logic tests (the runner lists
+  the bundle's tests through the companion and runs each shard's
+  deterministic slice; `--test_filter` composes). UI tests cannot be
+  sharded.
+
+Swift Testing (`@Test`) is supported: swift-testing tests execute, report
+per-test results, and their failures fail the target (validated
+continuously by `tests/validate.sh`).

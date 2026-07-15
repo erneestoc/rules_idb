@@ -57,7 +57,22 @@ def _companion_binary(ctx):
             return f
     fail("idb_companion binary not found in @idb_companion_dist//:dist")
 
+def _validate_attrs(ctx):
+    # These attrs are substituted into a double-quoted bash context in the
+    # runner template; metacharacters would corrupt (or execute inside) the
+    # generated script.
+    for attr_name in ("device_type", "os_version", "idb_path"):
+        value = getattr(ctx.attr, attr_name)
+        for bad in ('"', "$", "`", "\\", "\n"):
+            if bad in value:
+                fail("{}: {} may not contain {}".format(ctx.label, attr_name, repr(bad)))
+    if ctx.attr.max_concurrent_boots < 0:
+        fail("{}: max_concurrent_boots must be >= 0 (0 = auto)".format(ctx.label))
+    if ctx.attr.pool_size < 0:
+        fail("{}: pool_size must be >= 0 (0 = on demand)".format(ctx.label))
+
 def _ios_idb_test_runner_impl(ctx):
+    _validate_attrs(ctx)
     runfiles = ctx.runfiles(transitive_files = ctx.attr._companion.files)
 
     # The client is launched directly with the hermetic interpreter from
@@ -68,7 +83,13 @@ def _ios_idb_test_runner_impl(ctx):
     runfiles = runfiles.merge(ctx.attr._idb_client_lib[0][DefaultInfo].default_runfiles)
     runfiles = runfiles.merge(ctx.runfiles(
         files = [ctx.file._python],
-        transitive_files = ctx.attr._idb_client_lib[0][PyInfo].transitive_sources,
+        # The full runtime tree (stdlib included), not just the interpreter
+        # binary: remote executors materialize only declared inputs, and an
+        # interpreter without its stdlib dies on the first import.
+        transitive_files = depset(transitive = [
+            ctx.attr._idb_client_lib[0][PyInfo].transitive_sources,
+            ctx.attr._python_files.files,
+        ]),
     ))
 
     default_action_binary = "/usr/bin/true"
@@ -264,6 +285,11 @@ Hermetic python interpreter used to run the bundled client, resolved
 directly (not through python toolchain resolution, which consumers can
 override with interpreters too old for the client).
 """,
+        ),
+        "_python_files": attr.label(
+            cfg = "exec",
+            default = Label("//idb:client_python_files"),
+            doc = "The hermetic runtime's full file tree (stdlib etc.).",
         ),
         "_test_template": attr.label(
             default = Label("//idb:idb_test_runner.template.sh"),

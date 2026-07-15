@@ -1,4 +1,5 @@
 load("@rules_apple//apple:ios.bzl", "ios_application", "ios_ui_test", "ios_unit_test")
+load("@rules_apple//apple/testing/default_runner:ios_xctestrun_runner.bzl", "ios_xctestrun_runner")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_swift//swift:swift.bzl", "swift_library")
 load("@rules_idb//idb:idb_test_runner.bzl", "ios_idb_test_runner")
@@ -108,6 +109,118 @@ ios_unit_test(
         size = "medium",
         minimum_os_version = MINIMUM_OS_VERSION,
         runner = "@rules_apple//apple/testing/default_runner:ios_xctestrun_ordered_runner",
+        test_host = ":HostApp",
+        deps = [":HostedTestsLib"],
+    )
+    for i in range(1, 9)
+]
+
+# XCTSkip handling: skipped tests must not fail or miscount the run.
+swift_library(
+    name = "SkippingTestsLib",
+    testonly = True,
+    srcs = ["Tests/SkippingTests.swift"],
+    module_name = "SkippingTests",
+    tags = ["manual"],
+)
+
+ios_unit_test(
+    name = "SkippingTests",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    tags = ["manual"],
+    test_host = ":HostApp",
+    deps = [":SkippingTestsLib"],
+)
+
+# Swift Testing (@Test) coverage, on both runners for comparison.
+swift_library(
+    name = "SwiftTestingTestsLib",
+    testonly = True,
+    srcs = ["Tests/SwiftTestingTests.swift"],
+    module_name = "SwiftTestingTests",
+    tags = ["manual"],
+)
+
+ios_unit_test(
+    name = "SwiftTestingTests",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    tags = ["manual"],
+    test_host = ":HostApp",
+    deps = [":SwiftTestingTestsLib"],
+)
+
+ios_unit_test(
+    name = "SwiftTestingTests_xcodebuild",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = "@rules_apple//apple/testing/default_runner:ios_xctestrun_ordered_runner",
+    tags = ["manual"],
+    test_host = ":HostApp",
+    deps = [":SwiftTestingTestsLib"],
+)
+
+swift_library(
+    name = "FailingSwiftTestingTestsLib",
+    testonly = True,
+    srcs = ["Tests/FailingSwiftTestingTests.swift"],
+    module_name = "FailingSwiftTestingTests",
+    tags = ["manual"],
+)
+
+ios_unit_test(
+    name = "FailingSwiftTestingTests",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    tags = ["manual"],
+    test_host = ":HostApp",
+    deps = [":FailingSwiftTestingTestsLib"],
+)
+
+# Bazel test sharding: the runner partitions the bundle's tests per shard.
+ios_unit_test(
+    name = "HostedTestsSharded",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    shard_count = 3,
+    tags = ["manual"],
+    test_host = ":HostApp",
+    deps = [":HostedTestsLib"],
+)
+
+# The stock xcodebuild runner with a hand-rolled pooled simulator_creator
+# (PID lockfiles + stale-lock stealing) — what teams write today to make
+# --local_test_jobs work. Used by the benchmark as the apples-to-apples
+# concurrency comparison against rules_idb's built-in pool.
+sh_binary(
+    name = "flock_simulator_creator",
+    srcs = ["hooks/flock_simulator_creator.sh"],
+)
+
+sh_binary(
+    name = "flock_simulator_cleanup",
+    srcs = ["hooks/flock_simulator_cleanup.sh"],
+)
+
+ios_xctestrun_runner(
+    name = "xcodebuild_pooled_runner",
+    clean_up_simulator_action = ":flock_simulator_cleanup",
+    create_simulator_action = ":flock_simulator_creator",
+    device_type = "iPhone 17 Pro",
+)
+
+[
+    ios_unit_test(
+        name = "HostedTestsShard%d_xcb_pooled" % i,
+        size = "medium",
+        minimum_os_version = MINIMUM_OS_VERSION,
+        runner = ":xcodebuild_pooled_runner",
+        tags = ["manual"],
         test_host = ":HostApp",
         deps = [":HostedTestsLib"],
     )

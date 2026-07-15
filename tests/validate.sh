@@ -34,5 +34,25 @@ bazel test //examples:HostedTests --nocache_test_results --test_output=summary >
 check "hosted suite passes" "[[ $? -eq 0 ]]"
 check "junit xml has all 15 tests" "grep -q 'tests=\"15\" failures=\"0\"' '$TL/examples/HostedTests/test.xml'"
 
+# 6. XCTSkip must not fail the run.
+bazel test //examples:SkippingTests --nocache_test_results --test_output=summary >/dev/null 2>&1
+check "skipped test does not fail the target" "[[ $? -eq 0 ]]"
+check "skip suite reports both tests" "grep -q 'executed 2 tests, 0 failed' '$TL/examples/SkippingTests/test.log'"
+
+# 7. Swift Testing (@Test) executes, and its failures fail the target.
+bazel test //examples:SwiftTestingTests --nocache_test_results --test_output=summary >/dev/null 2>&1
+check "swift-testing suite passes" "[[ $? -eq 0 ]]"
+check "swift-testing ran both tests" "grep -q 'executed 2 tests, 0 failed' '$TL/examples/SwiftTestingTests/test.log'"
+bazel test //examples:FailingSwiftTestingTests --nocache_test_results --test_output=summary >/dev/null 2>&1
+check "failing swift-testing test fails the target" "[[ $? -ne 0 ]]"
+check "swift-testing failure names the expectation" "grep -q 'intentional failure for runner validation' '$TL/examples/FailingSwiftTestingTests/test.log'"
+
+# 8. Sharding: every test runs exactly once across shards.
+bazel test //examples:HostedTestsSharded --nocache_test_results --test_output=summary >/dev/null 2>&1
+check "sharded suite passes" "[[ $? -eq 0 ]]"
+shard_union=$(cat "$TL/examples/HostedTestsSharded/shard_"*"_of_3/test.log" 2>/dev/null | grep -o '"methodName": "[A-Za-z0-9()]*"' | sort | uniq | wc -l | tr -d ' ')
+shard_total=$(cat "$TL/examples/HostedTestsSharded/shard_"*"_of_3/test.log" 2>/dev/null | grep -c '"methodName"')
+check "shards cover all 15 tests exactly once" "[[ '$shard_union' == '15' && '$shard_total' == '15' ]]"
+
 echo
 if [[ $fails -eq 0 ]]; then echo "ALL BEHAVIORAL CHECKS PASSED"; else echo "$fails CHECK(S) FAILED"; exit 1; fi
