@@ -99,7 +99,7 @@ ios_unit_test(
         test_host = ":HostApp",
         deps = [":HostedTestsLib"],
     )
-    for i in range(1, 5)
+    for i in range(1, 9)
 ]
 
 [
@@ -111,8 +111,57 @@ ios_unit_test(
         test_host = ":HostApp",
         deps = [":HostedTestsLib"],
     )
-    for i in range(1, 5)
+    for i in range(1, 9)
 ]
+
+# A test host inflated with a 400 MB opaque resource, used by the benchmark
+# harness to measure staging/install wall time at a realistic app size.
+# Random bytes defeat compression, so archive staging pays full price.
+# Tagged manual: benchmark-only, too heavy for CI.
+genrule(
+    name = "big_asset",
+    outs = ["big_asset.bin"],
+    cmd = "dd if=/dev/urandom of=$@ bs=1m count=400 2>/dev/null",
+    tags = ["manual"],
+)
+
+swift_library(
+    name = "BigHostAppLib",
+    srcs = ["HostApp/AppDelegate.swift"],
+    data = [":big_asset"],
+    module_name = "BigHostApp",
+    tags = ["manual"],
+)
+
+ios_application(
+    name = "BigHostApp",
+    bundle_id = "com.rulesidb.example.BigHostApp",
+    families = ["iphone"],
+    infoplists = ["HostApp/BigInfo.plist"],
+    minimum_os_version = MINIMUM_OS_VERSION,
+    tags = ["manual"],
+    deps = [":BigHostAppLib"],
+)
+
+ios_unit_test(
+    name = "HostedTestsBig",
+    size = "large",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    tags = ["manual"],
+    test_host = ":BigHostApp",
+    deps = [":HostedTestsLib"],
+)
+
+ios_unit_test(
+    name = "HostedTestsBig_xcodebuild",
+    size = "large",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = "@rules_apple//apple/testing/default_runner:ios_xctestrun_ordered_runner",
+    tags = ["manual"],
+    test_host = ":BigHostApp",
+    deps = [":HostedTestsLib"],
+)
 
 # --- Feature demonstration targets -----------------------------------------
 

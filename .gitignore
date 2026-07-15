@@ -3,3 +3,4 @@ bazel-*
 .venv-src/
 tools/idb-dist/
 benchmark/results/
+benchmark/results-baseline/
