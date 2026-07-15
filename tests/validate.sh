@@ -47,8 +47,10 @@ bazel test //examples:FailingSwiftTestingTests --nocache_test_results --test_out
 check "failing swift-testing test fails the target" "[[ $? -ne 0 ]]"
 check "swift-testing failure names the expectation" "grep -q 'intentional failure for runner validation' '$TL/examples/FailingSwiftTestingTests/test.log'"
 
-# 8. Sharding: every test runs exactly once across shards.
-bazel test //examples:HostedTestsSharded --nocache_test_results --test_output=summary >/dev/null 2>&1
+# 8. Sharding: every test runs exactly once across shards. Serialized:
+# three parallel shard actions would need three simulators, which starves
+# the small hosted CI runners (they preboot exactly one).
+bazel test //examples:HostedTestsSharded --local_test_jobs=1 --nocache_test_results --test_output=summary >/dev/null 2>&1
 check "sharded suite passes" "[[ $? -eq 0 ]]"
 shard_union=$(cat "$TL/examples/HostedTestsSharded/shard_"*"_of_3/test.log" 2>/dev/null | grep -o '"methodName": "[A-Za-z0-9()]*"' | sort | uniq | wc -l | tr -d ' ')
 shard_total=$(cat "$TL/examples/HostedTestsSharded/shard_"*"_of_3/test.log" 2>/dev/null | grep -c '"methodName"')
