@@ -20,11 +20,11 @@ requirement is Xcode.**
 
 ```bzl
 # MODULE.bazel
-bazel_dep(name = "rules_idb", version = "0.1.3")
+bazel_dep(name = "rules_idb", version = "0.2.0")
 git_override(  # until rules_idb is published to the Bazel Central Registry
     module_name = "rules_idb",
     remote = "https://github.com/erneestoc/rules_idb.git",
-    tag = "v0.1.3",
+    tag = "v0.2.0",
 )
 ```
 
