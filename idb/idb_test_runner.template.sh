@@ -93,12 +93,8 @@ runfile() {
 }
 
 # Tool resolution precedence: test-time env override, then the runner rule's
-# idb_path attribute, then the client bundled with rules_idb. The bundled
-# client runs on rules_idb's own hermetic interpreter, taken straight from
-# runfiles so that the consumer's python toolchain configuration cannot
-# substitute an interpreter that is too old for it.
+# idb_path attribute, then the py_binary client bundled with rules_idb.
 idb_bin="${RULES_IDB_IDB_PATH:-%(idb_path)s}"
-idb_launcher_dir=""
 random_order="%(random)s"
 create_simulator_action_binary="%(create_simulator_action_binary)s"
 clean_up_simulator_action_binary="%(clean_up_simulator_action_binary)s"
@@ -107,31 +103,7 @@ post_action_binary="%(post_action_binary)s"
 post_action_determines_exit_code="%(post_action_determines_exit_code)s"
 
 if [[ -z "$idb_bin" ]]; then
-  idb_python="$(runfile "%(idb_python_path)s")"
-  idb_pythonpath=""
-  idb_client_imports="%(idb_client_imports)s"
-  saved_IFS=$IFS
-  IFS=":"
-  # shellcheck disable=SC2086
-  for import_path in $idb_client_imports; do
-    [[ -n "$import_path" ]] || continue
-    if [[ -n "$idb_pythonpath" ]]; then
-      idb_pythonpath="$idb_pythonpath:${TEST_SRCDIR}/$import_path"
-    else
-      idb_pythonpath="${TEST_SRCDIR}/$import_path"
-    fi
-  done
-  IFS=$saved_IFS
-
-  idb_launcher_dir="$(mktemp -d "${TEST_TMPDIR:-${TMPDIR:-/tmp}}/idb_launcher.XXXXXX")"
-  idb_bin="$idb_launcher_dir/idb"
-  cat > "$idb_bin" <<LAUNCHER
-#!/bin/bash
-export PYTHONPATH="$idb_pythonpath\${PYTHONPATH:+:\$PYTHONPATH}"
-export PYTHONSAFEPATH=1
-exec "$idb_python" -c 'import sys; from idb.cli.main import main; sys.exit(main())' "\$@"
-LAUNCHER
-  chmod +x "$idb_bin"
+  idb_bin="$(runfile "%(idb_client_path)s")"
 fi
 
 if ! command -v "$idb_bin" >/dev/null 2>&1; then
@@ -206,9 +178,6 @@ cleanup() {
   fi
   if [[ -n "$companion_sock_dir" ]]; then
     rm -rf "$companion_sock_dir"
-  fi
-  if [[ -n "$idb_launcher_dir" ]]; then
-    rm -rf "$idb_launcher_dir"
   fi
   if [[ -z "${NO_CLEAN:-}" ]]; then
     rm -rf "${test_tmp_dir}"

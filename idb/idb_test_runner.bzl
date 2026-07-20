@@ -17,19 +17,6 @@ load(
     "AppleDeviceTestRunnerInfo",
     "apple_provider",
 )
-load("@rules_python//python:py_info.bzl", "PyInfo")
-
-def _py312_transition_impl(_settings, _attr):
-    return {"@rules_python//python/config_settings:python_version": "3.12"}
-
-# The vendored client and its locked pip wheels target python 3.12; pin the
-# configuration on the dependency edge so the consumer's default python
-# version doesn't break wheel selection.
-_py312_transition = transition(
-    implementation = _py312_transition_impl,
-    inputs = [],
-    outputs = ["@rules_python//python/config_settings:python_version"],
-)
 
 def _get_template_substitutions(ctx, *, create_simulator_action_binary, clean_up_simulator_action_binary, pre_action_binary, post_action_binary, post_action_determines_exit_code):
     substitutions = {
@@ -39,8 +26,7 @@ def _get_template_substitutions(ctx, *, create_simulator_action_binary, clean_up
         "max_concurrent_boots": str(ctx.attr.max_concurrent_boots),
         "shutdown_after_test": "true" if ctx.attr.shutdown_simulator_after_test else "false",
         "idb_path": ctx.attr.idb_path,
-        "idb_python_path": ctx.file._python.short_path,
-        "idb_client_imports": ":".join(ctx.attr._idb_client_lib[0][PyInfo].imports.to_list()),
+        "idb_client_path": ctx.executable._idb_client.short_path,
         "companion_path": _companion_binary(ctx).short_path,
         "random": "true" if ctx.attr.random else "false",
         "create_simulator_action_binary": create_simulator_action_binary,
@@ -75,22 +61,8 @@ def _ios_idb_test_runner_impl(ctx):
     _validate_attrs(ctx)
     runfiles = ctx.runfiles(transitive_files = ctx.attr._companion.files)
 
-    # The client is launched directly with the hermetic interpreter from
-    # runfiles rather than as a py_binary: py_binary resolves its interpreter
-    # through toolchain resolution, which the consumer's root module can
-    # (and in practice does) redirect to a system python that is too old for
-    # the client.
-    runfiles = runfiles.merge(ctx.attr._idb_client_lib[0][DefaultInfo].default_runfiles)
-    runfiles = runfiles.merge(ctx.runfiles(
-        files = [ctx.file._python],
-        # The full runtime tree (stdlib included), not just the interpreter
-        # binary: remote executors materialize only declared inputs, and an
-        # interpreter without its stdlib dies on the first import.
-        transitive_files = depset(transitive = [
-            ctx.attr._idb_client_lib[0][PyInfo].transitive_sources,
-            ctx.attr._python_files.files,
-        ]),
-    ))
+    runfiles = runfiles.merge(ctx.attr._idb_client[DefaultInfo].default_runfiles)
+    runfiles = runfiles.merge(ctx.runfiles(files = [ctx.executable._idb_client]))
 
     default_action_binary = "/usr/bin/true"
 
@@ -271,25 +243,15 @@ criteria.
             default = Label("@idb_companion_dist//:dist"),
             doc = "Prebuilt idb_companion distribution (binary + simulator shims).",
         ),
-        "_idb_client_lib": attr.label(
-            cfg = _py312_transition,
-            default = Label("//third_party/idb_client:idb_client_lib"),
-            doc = "Bundled fb-idb python client library.",
-        ),
-        "_python": attr.label(
-            allow_single_file = True,
+        "_idb_client": attr.label(
             cfg = "exec",
-            default = Label("//idb:client_python"),
+            default = Label("//third_party/idb_client:idb_client"),
+            executable = True,
             doc = """
-Hermetic python interpreter used to run the bundled client, resolved
-directly (not through python toolchain resolution, which consumers can
-override with interpreters too old for the client).
+Bundled fb-idb python client launcher. It is built in the execution
+configuration so the launcher and its hermetic Python runtime match the
+macOS worker that runs the test.
 """,
-        ),
-        "_python_files": attr.label(
-            cfg = "exec",
-            default = Label("//idb:client_python_files"),
-            doc = "The hermetic runtime's full file tree (stdlib etc.).",
         ),
         "_test_template": attr.label(
             default = Label("//idb:idb_test_runner.template.sh"),
