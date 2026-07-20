@@ -19,7 +19,6 @@ bazel_dep(name = "rules_python", version = "1.7.0")
 # system python is 3.9).
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.12")
-use_repo(python, "python_3_12_aarch64-apple-darwin", "python_3_12_host", "python_3_12_x86_64-apple-darwin")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(
