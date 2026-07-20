@@ -2,7 +2,7 @@
 
 module(
     name = "rules_idb",
-    version = "0.2.0",
+    version = "0.2.1",
     bazel_compatibility = [">=7.1.0"],  # getenv() needs 7.1
     compatibility_level = 1,
 )
