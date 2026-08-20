@@ -205,7 +205,7 @@
     "//idb:extensions.bzl%idb": {
       "general": {
         "bzlTransitiveDigest": "fyEaYtbXqYMYrSdUTgyALCH/Qy72LfTjy2baKs1qnao=",
-        "usagesDigest": "BgzKDKsX/BOaaJFrHR72zfF49m9ix3C9zsOTeTc3FY4=",
+        "usagesDigest": "UbTiM/e94oDGTiLtHnLTUT7Wv5HNXm8xV2tYvBdRhQA=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools",
           "ENV:RULES_IDB_COMPANION_DIST_URL \\0",

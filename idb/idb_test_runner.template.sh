@@ -64,16 +64,39 @@ fmt_ms() {
 }
 runner_start_ms=$(now_ms)
 
+# Run a command with a hard deadline, SIGKILLing it on overrun (returns
+# 124, like timeout(1)). Every CoreSimulator lifecycle call can hang
+# indefinitely against a wedged device or a stuck CoreSimulatorService;
+# bounding them turns silent budget-eating hangs into fast, attributable
+# failures. Children must not inherit the pool/boot-gate lock fds.
+run_bounded() {
+  local deadline_secs="$1"
+  shift
+  "$@" 200>&- 201>&- &
+  local cmd_pid=$!
+  for (( _i = 0; _i < deadline_secs * 2; _i++ )); do
+    kill -0 "$cmd_pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$cmd_pid" 2>/dev/null; then
+    kill -9 "$cmd_pid" 2>/dev/null || true
+    wait "$cmd_pid" 2>/dev/null || true
+    return 124
+  fi
+  wait "$cmd_pid"
+}
+
 # True once SpringBoard has a PID in the simulator's launchd -- the earliest
 # point at which app installs/launches reliably succeed. `simctl bootstatus`
 # is not enough: it can report a terminal failure status yet exit 0, and
 # even a successful boot finishes slightly before SpringBoard is up; running
 # tests in that window fails with zero test results (seen at 8-way
-# concurrency).
+# concurrency). The probe itself is bounded: `simctl spawn` against a wedged
+# device can hang rather than fail.
 wait_for_springboard() {
   local udid="$1"
   for _ in $(seq 1 40); do
-    if xcrun simctl spawn "$udid" launchctl list 2>/dev/null \
+    if run_bounded 10 xcrun simctl spawn "$udid" launchctl list 2>/dev/null \
         | grep com.apple.SpringBoard | grep -qv '^-'; then
       return 0
     fi
@@ -442,8 +465,21 @@ good = [
 for _, device in matches:
     if good and device is good[0]:
         continue
-    subprocess.run(["xcrun", "simctl", "shutdown", device["udid"]], capture_output=True)
-    subprocess.run(["xcrun", "simctl", "delete", device["udid"]], capture_output=True)
+    # Bounded: both can hang against a wedged CoreSimulatorService, and a
+    # hang here would eat the test's whole budget before the run starts.
+    for lifecycle_args in (["shutdown"], ["delete"]):
+        try:
+            subprocess.run(
+                ["xcrun", "simctl", *lifecycle_args, device["udid"]],
+                capture_output=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                "note: 'simctl %s %s' still running after 60s; continuing"
+                % (lifecycle_args[0], device["udid"]),
+                file=sys.stderr,
+            )
     print(
         "note: removed simulator %s (%s): device/runtime did not match the request"
         % (name, device["udid"]),
@@ -509,22 +545,37 @@ PYEOF
 
     # Boot the simulator and wait until it is usable, with a deadline: a
     # wedged boot would otherwise hold this machine-wide boot-gate slot
-    # forever ('bootstatus -b' has no timeout of its own). Non-zero exits
-    # are tolerated the same way rules_apple's simulator_creator does (149
-    # means "already booted"); the readiness check below is authoritative.
-    boot_wait_secs="${RULES_IDB_BOOT_TIMEOUT:-240}"
-    xcrun simctl bootstatus "$simulator_id" -b >&2 200>&- 201>&- &
-    bootstatus_pid=$!
-    for (( i = 0; i < boot_wait_secs * 2; i++ )); do
-      kill -0 "$bootstatus_pid" 2>/dev/null || break
-      sleep 0.5
-    done
-    if kill -0 "$bootstatus_pid" 2>/dev/null; then
-      echo "note: boot still pending after ${boot_wait_secs}s; abandoning the wait" >&2
-      kill -9 "$bootstatus_pid" 2>/dev/null || true
+    # forever ('bootstatus -b' has no timeout of its own). The deadline is
+    # derived from the test's own timeout (Bazel exports TEST_TIMEOUT) so a
+    # wedged boot fails attributably here instead of as a silent SIGKILL,
+    # while slow legitimate boots keep nearly the whole budget. On overrun
+    # the boot is deliberately left running: CoreSimulatorService owns it
+    # and keeps going in the background, so a flaky-test retry (or the next
+    # test on this slot) resumes the wait instead of restarting a slow
+    # first-boot data migration from zero. Non-zero exits are tolerated the
+    # same way rules_apple's simulator_creator does (149 means "already
+    # booted"); the readiness check below is authoritative.
+    boot_wait_secs="${RULES_IDB_BOOT_TIMEOUT:-}"
+    if [[ -z "$boot_wait_secs" ]]; then
+      boot_wait_secs=240
+      if [[ -n "${TEST_TIMEOUT:-}" && "$TEST_TIMEOUT" -gt 0 ]]; then
+        boot_budget=$(( TEST_TIMEOUT - 30 ))
+        if [[ "$boot_budget" -lt 30 ]]; then
+          boot_budget=30
+        fi
+        if [[ "$boot_budget" -lt "$boot_wait_secs" ]]; then
+          boot_wait_secs=$boot_budget
+        fi
+      fi
     fi
-    wait "$bootstatus_pid" 2>/dev/null \
-      || echo "note: ignoring non-zero 'simctl bootstatus' exit code" >&2
+    bootstatus_exit=0
+    run_bounded "$boot_wait_secs" xcrun simctl bootstatus "$simulator_id" -b >&2 \
+      || bootstatus_exit=$?
+    if [[ "$bootstatus_exit" -eq 124 ]]; then
+      echo "note: boot still pending after ${boot_wait_secs}s; abandoning the wait (the boot continues in the background and a retry resumes it)" >&2
+    elif [[ "$bootstatus_exit" -ne 0 ]]; then
+      echo "note: ignoring non-zero 'simctl bootstatus' exit code" >&2
+    fi
 
     # Release the boot slot; the pool slot lock (fd 200) stays held. The
     # readiness wait below intentionally happens after the release: it is
@@ -535,8 +586,8 @@ PYEOF
     # never gets there (bootstatus tolerates failed boots; see helper).
     if ! wait_for_springboard "$simulator_id"; then
       echo "note: simulator not ready after boot; re-booting it once" >&2
-      xcrun simctl shutdown "$simulator_id" >&2 || true
-      xcrun simctl bootstatus "$simulator_id" -b >&2 || true
+      run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
+      run_bounded "$boot_wait_secs" xcrun simctl bootstatus "$simulator_id" -b >&2 || true
       wait_for_springboard "$simulator_id" \
         || echo "note: simulator still not ready; proceeding, idb will surface errors" >&2
     fi
@@ -953,8 +1004,8 @@ run_idb_once
 if [[ "$idb_exit_code" -ne 0 && "$parse_exit_code" -eq 71 && -n "${acquired_slot:-}" ]]; then
   echo "note: infrastructure failure (idb exited $idb_exit_code with no test results); re-booting the simulator and retrying once" >&2
   kill_companion
-  xcrun simctl shutdown "$simulator_id" >&2 || true
-  xcrun simctl bootstatus "$simulator_id" -b >&2 || true
+  run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
+  run_bounded "${boot_wait_secs:-240}" xcrun simctl bootstatus "$simulator_id" -b >&2 || true
   wait_for_springboard "$simulator_id" || true
   sleep 2
   spawn_companion
@@ -995,7 +1046,7 @@ fi
 if [[ "$idb_exit_code" -ne 0 && "$parse_exit_code" -eq 71 && -n "${acquired_slot:-}" ]]; then
   echo "note: infrastructure failure (idb exited $idb_exit_code with no test results);" >&2
   echo "note: shutting simulator $simulator_id down for a clean boot on the next run" >&2
-  xcrun simctl shutdown "$simulator_id" >&2 || true
+  run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -1107,10 +1158,10 @@ if [[ -n "$clean_up_simulator_action_binary" ]]; then
   SIMULATOR_UDID="$simulator_id" SIMULATOR_REUSE_SIMULATOR="${reuse_simulator:-}" \
     "$clean_up_simulator_action_binary" 200>&- 201>&- || true
 elif [[ "$shutdown_after_test" == true || -n "${RULES_IDB_SHUTDOWN_SIMULATOR:-}" ]]; then
-  xcrun simctl shutdown "$simulator_id" >&2 || true
+  run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
 elif [[ -n "${acquired_slot:-}" && "$acquired_slot" -ge "$warm_pool_size" ]]; then
   echo "note: slot $acquired_slot >= warm pool size $warm_pool_size; shutting simulator down" >&2
-  xcrun simctl shutdown "$simulator_id" >&2 || true
+  run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
 fi
 
 if [[ "$post_action_determines_exit_code" == true ]]; then
