@@ -190,6 +190,7 @@ test_tmp_dir="$(mktemp -d "${TEST_TMPDIR:-${TMPDIR:-/tmp}}/idb_test_runner.XXXXX
 companion_pid=""
 companion_sock_dir=""
 cleanup() {
+  local cleanup_exit_code=$?
   if [[ -n "$companion_pid" ]]; then
     kill "$companion_pid" 2>/dev/null || true
     # The companion's gRPC server can ignore SIGTERM; make sure it dies.
@@ -201,6 +202,19 @@ cleanup() {
   fi
   if [[ -n "$companion_sock_dir" ]]; then
     rm -rf "$companion_sock_dir"
+  fi
+  # An abnormal exit (Bazel timeout SIGTERM -> 143, Ctrl-C -> 130) kills
+  # the in-flight test session; the simulator can be left wedged by it --
+  # still reporting Booted, but hanging every future session. Shut it down
+  # so the next claimant of this slot cold-boots clean; normal exits leave
+  # it warm. Bounded well inside Bazel's SIGTERM->SIGKILL grace.
+  if [[ "$cleanup_exit_code" -eq 143 || "$cleanup_exit_code" -eq 130 ]] \
+      && [[ -n "${acquired_slot:-}" && -n "${simulator_id:-}" ]]; then
+    echo "note: terminated mid-run; shutting simulator $simulator_id down" >&2
+    run_bounded 10 xcrun simctl shutdown "$simulator_id" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${session_marker:-}" ]]; then
+    rm -f "$session_marker"
   fi
   if [[ -z "${NO_CLEAN:-}" ]]; then
     rm -rf "${test_tmp_dir}"
@@ -377,6 +391,20 @@ except OSError:
     fi
   done
   echo "note: acquired simulator pool slot $acquired_slot (pool: $pool_key)" >&2
+  # Session marker: records that this slot's holder is mid-test-session
+  # (written once the simulator is resolved, removed on any controlled
+  # exit). Finding one now means the previous holder died without cleanup
+  # -- we hold its released flock, so it is gone; had it exited normally
+  # the marker would be too. Most likely SIGKILL after Bazel's timeout
+  # grace, which the TERM trap cannot catch. Its simulator may be carrying
+  # a dead test session that hangs every future session, so recycle it.
+  session_marker="$pool_dir/slot-$acquired_slot.session"
+  stale_session=false
+  if [[ -f "$session_marker" ]]; then
+    stale_session=true
+    echo "note: previous test on slot $acquired_slot died mid-session ($(cat "$session_marker" 2>/dev/null || true)); recycling its simulator" >&2
+  fi
+
 
   # Find or create the simulator bound to this pool slot. The lookup runs
   # ungated; creation happens under the boot gate below.
@@ -595,6 +623,11 @@ PYEOF
     # readiness on a loaded machine.
     sleep 2
   fi
+
+  # From here this slot's simulator carries a live test session; the marker
+  # stays until a controlled exit removes it (see cleanup). Marker write
+  # failure just degrades to trap-only wedge recovery.
+  printf '%s %s\n' "$$" "$simulator_id" > "$session_marker" 2>/dev/null || true
 fi
 
 simulator_ms=$(( $(now_ms) - stage_start_ms - stage_ms ))
