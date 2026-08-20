@@ -391,6 +391,7 @@ except OSError:
     fi
   done
   echo "note: acquired simulator pool slot $acquired_slot (pool: $pool_key)" >&2
+
   # Session marker: records that this slot's holder is mid-test-session
   # (written once the simulator is resolved, removed on any controlled
   # exit). Finding one now means the previous holder died without cleanup
@@ -404,7 +405,6 @@ except OSError:
     stale_session=true
     echo "note: previous test on slot $acquired_slot died mid-session ($(cat "$session_marker" 2>/dev/null || true)); recycling its simulator" >&2
   fi
-
 
   # Find or create the simulator bound to this pool slot. The lookup runs
   # ungated; creation happens under the boot gate below.
@@ -539,6 +539,22 @@ PYEOF
     simulator_state="${result##*:}"
     simulator_id="${result%%:*}"
     echo "note: using simulator '$simulator_name' ($simulator_id, $simulator_state)" >&2
+  fi
+
+  # A reused "Booted" simulator is not necessarily usable: recycle it when
+  # the previous holder died mid-session (marker above), and probe
+  # readiness otherwise -- state Booted alone is not a readiness signal
+  # when an earlier boot or session died midway. Routing through the boot
+  # block below reuses its gate, readiness wait, and settle.
+  if [[ "$needs_create" != true && "$simulator_state" == "Booted" ]]; then
+    if [[ "$stale_session" == true ]]; then
+      run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
+      simulator_state="Shutdown"
+    elif ! wait_for_springboard "$simulator_id"; then
+      echo "note: reused simulator $simulator_id is booted but not responding; re-booting it" >&2
+      run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
+      simulator_state="Shutdown"
+    fi
   fi
 
   if [[ "$needs_create" == true || "$simulator_state" != "Booted" ]]; then
