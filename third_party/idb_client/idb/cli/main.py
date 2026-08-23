@@ -31,8 +31,11 @@ logging.getLogger("scuba_logger").setLevel(logging.CRITICAL)
 
 import idb.common.plugin as plugin
 from idb.cli.commands.accessibility import (
+    AccessibilityDescribeMarkerCommand,
     AccessibilityInfoAllCommand,
     AccessibilityInfoAtPointCommand,
+    AccessibilityScrollCommand,
+    AccessibilitySetValueCommand,
 )
 from idb.cli.commands.app import (
     AppInstallCommand,
@@ -68,6 +71,7 @@ from idb.cli.commands.file import (
 )
 from idb.cli.commands.focus import FocusCommand
 from idb.cli.commands.framework import FrameworkInstallCommand
+from idb.cli.commands.help import HelpCommand
 from idb.cli.commands.hid import (
     ButtonCommand,
     KeyCommand,
@@ -75,8 +79,9 @@ from idb.cli.commands.hid import (
     MultiTapCommand,
     PinchCommand,
     RemoteCommand,
+    RotateCommand,
+    ShakeCommand,
     SwipeCommand,
-    TapCommand,
     TextCommand,
 )
 from idb.cli.commands.instruments import InstrumentsCommand
@@ -97,6 +102,7 @@ from idb.cli.commands.settings import (
     SetPreferenceCommand,
 )
 from idb.cli.commands.shell import ShellCommand
+from idb.cli.commands.tap import TapCommand
 from idb.cli.commands.target import (
     ConnectCommandException,
     TargetBootCommand,
@@ -204,6 +210,7 @@ async def gen_main(cmd_input: list[str] | None = None) -> SysExitArg:
     )
     shell_command = ShellCommand(parser=parser)
     commands: list[Command] = [
+        HelpCommand(),
         AppInstallCommand(),
         AppUninstallCommand(),
         AppListCommand(),
@@ -277,6 +284,9 @@ async def gen_main(cmd_input: list[str] | None = None) -> SysExitArg:
             commands=[
                 AccessibilityInfoAllCommand(),
                 AccessibilityInfoAtPointCommand(),
+                AccessibilityDescribeMarkerCommand(),
+                AccessibilityScrollCommand(),
+                AccessibilitySetValueCommand(),
                 TapCommand(),
                 MultiTapCommand(),
                 PinchCommand(),
@@ -286,6 +296,8 @@ async def gen_main(cmd_input: list[str] | None = None) -> SysExitArg:
                 KeyCommand(),
                 KeySequenceCommand(),
                 SwipeCommand(),
+                RotateCommand(),
+                ShakeCommand(),
             ],
         ),
         CommandGroup(
@@ -333,6 +345,7 @@ async def gen_main(cmd_input: list[str] | None = None) -> SysExitArg:
         ListCommand,
         shell_command,
     ]
+    plugin.load_cli_plugins()
     commands.extend(plugin.get_commands())
     root_command = CommandGroup(
         name="root_command",
@@ -347,7 +360,7 @@ async def gen_main(cmd_input: list[str] | None = None) -> SysExitArg:
 
     try:
         args = parser.parse_args(cmd_input)
-        plugin.on_launch(logger)
+        plugin.on_launch(logger, subcommands=root_command.resolve_subcommand_path(args))
         await root_command.run(args)
         return 0
     except ConnectCommandException as e:

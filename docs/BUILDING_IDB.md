@@ -4,7 +4,9 @@ rules_idb drives tests through Facebook's [idb](https://github.com/facebook/idb)
 a per-simulator gRPC daemon (`idb_companion`, built on FBSimulatorControl)
 plus a thin python CLI client (`idb`). The 2022 binary releases are broken on
 current machines (see the README), so both are built from `main`. Verified
-against commit `70d75b3` (2026-07-10) with Xcode 26.2 on macOS 26.
+against commit `3f1bb6eb3ae7041ba4902605c6a5a4d686ccc3f8` (2026-08-22) with
+Xcode 26.2 on macOS 26. (Previously verified against `70d75b3`,
+2026-07-10.)
 
 ## Prerequisites
 
@@ -21,10 +23,14 @@ git apply /path/to/rules_idb/patches/idb-build-fixes.patch
 ```
 
 The patch carries fixes for upstream issues in the open-source build (Meta
-builds internally with Buck; none of these paths are covered by their CI):
+builds internally with Buck; none of these paths are covered by their CI).
+Two fixes that were needed at `70d75b3` are gone as of `3f1bb6e` — upstream
+now ships `Companion/project.yml`'s `ReplProtocol`/`CompanionDiscovery`
+targets and `protoc_compiler_template.py`'s `grpclib.plugin.main` import
+directly — so the patch no longer touches those two files.
 
-* **`Companion/project.yml`**: adds the missing `ReplProtocol` framework
-  target (companion sources import it, but no OSS target builds it).
+Behavioral fixes (carried since `70d75b3`):
+
 * **`FBiOSTarget.h` / `FBiOSTarget.swift`**: two C functions are
   reimplemented in Swift with `@_cdecl` while their `_Nonnull` C prototypes
   stay in the header. Swift serializes the `@_cdecl` thunk's SIL with an
@@ -33,11 +39,12 @@ builds internally with Buck; none of these paths are covered by their CI):
   mismatch` deserialization failure when compiling `idb_companion` in
   Release. The patch marks the prototypes `NS_SWIFT_UNAVAILABLE` and exposes
   renamed `public` Swift functions instead.
-* **`protoc_compiler_template.py`**: the python client's generated protoc
-  plugin used `pkg_resources`, which no longer exists in modern setuptools.
 * **`InstallMethodHandler.swift`**: the handler created a new AsyncIterator
   per read on the gRPC request stream, which grpc-swift's
   `NIOThrowingAsyncSequenceProducer` forbids (fatal error on every install).
+  As of `3f1bb6e` upstream added a second, parallel zip-archive install path
+  (`installZipArchive`) with the same bug; the patch's single-iterator
+  wrapper now threads through that path too.
 * **`FBTestRunnerConfiguration.swift`**: adds the platform's
   `Developer/usr/lib` to the test host's `DYLD_FALLBACK_LIBRARY_PATH` so
   Swift test bundles can load `libXCTestSwiftSupport.dylib`; also plumbs a
@@ -50,6 +57,34 @@ builds internally with Buck; none of these paths are covered by their CI):
   test during UI-test teardown (it usually already exited) no longer fails
   the run.
 
+Toolchain-compatibility fixes (new at `3f1bb6e`, Swift 6.2.3 /
+swiftlang-6.2.3.3.21 on Xcode 26.2 — none of these are behavioral, they only
+work around the current Swift compiler rejecting patterns upstream's own
+code already uses elsewhere):
+
+* **`FBRemoteInvoking.swift`**: upstream already has a `nonisolated(unsafe)`
+  workaround here for a `sending Result<Any?, Error>` false positive (see
+  their own commit `3a78617`), but it doesn't fully satisfy this compiler.
+  Applying `nonisolated(unsafe)` to the constructed `Result` itself (not
+  just the payload inside it) does.
+* **`FBAXBridgeTransport.swift`**: two `[String]`-returning functions built
+  their argument list as one long `+`-chained expression; the type checker
+  times out on it under this compiler. Rewritten as a `var` built up
+  statement-by-statement.
+* **`Companion/main.swift`, `LaunchMethodHandler.swift`,
+  `ReplSocketClient.swift`**: `Task { ... }` / `group.addTask { ... }`
+  closures capturing already-`nonisolated(unsafe)`-rebound values still hit
+  "passing closure as a 'sending' parameter risks causing data races" here.
+  Giving the closure itself an explicit `@Sendable` type annotation (in
+  addition to the existing `nonisolated(unsafe)` rebind of its captures)
+  resolves it; `nonisolated(unsafe)` alone does not, even though the
+  otherwise-identical pattern in `LogMethodHandler.swift` compiles as only a
+  warning without it. This diagnostic is flaky in exactly the way upstream's
+  own `FBRemoteInvoking.swift` comment predicts ("newer Swift compilers no
+  longer treat the [...] parameter as region-disconnected"); re-verify these
+  four spots against whatever Swift toolchain is current when next bumping
+  the pin.
+
 ## 2. Build the companion
 
 ```sh
@@ -61,8 +96,10 @@ cd ~/workspace/idb-src
 # the retry succeeds — upstream project-generation quirk)
 ```
 
-Then assemble the runtime layout (skipping `idb-repl`, which needs a
-`CompanionDiscovery` target that doesn't exist in the OSS project either):
+Then assemble the runtime layout (skipping `idb-repl`; as of `3f1bb6e`
+upstream's `Companion/project.yml` does define the `CompanionDiscovery`
+target it needs, but building `idb-repl` itself is untested here and not
+required for the companion/client this repo uses):
 
 ```sh
 R=Build/Products/Release; S=Build/Products/Release-iphonesimulator
@@ -125,3 +162,16 @@ Notes:
 * Companions persist per simulator UDID (registered under `/tmp/idb`) and
   are reused across runs. Stale registry entries after killing companions
   can be cleared with `rm -rf /tmp/idb ~/.idb`.
+* When bumping the pinned commit, delete any stale generated
+  `IDBGRPCSwift/idb.grpc.swift` / `idb.pb.swift` from a previous build
+  before running `build.sh build idb_companion` again — it only regenerates
+  them when they're *absent*, and stale ones from the old commit's
+  `proto/idb.proto` compile against the new Swift/companion sources with
+  wrong field names, producing confusing "cannot find type" / "has no
+  member" errors that look unrelated to protos.
+* Re-vendoring `third_party/idb_client`'s generated `idb_pb2.py` /
+  `idb_grpc.py` (e.g. via `python -m grpc_tools.protoc` plus a
+  `grpclib.plugin.main`-based `protoc-gen-python_grpc` plugin) produces an
+  `import idb_pb2` in `idb_grpc.py`; hand-fix it to
+  `import idb.grpc.idb_pb2 as idb_pb2` to match the package layout the rest
+  of the vendored client expects.

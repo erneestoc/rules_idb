@@ -51,6 +51,10 @@ class CompanionServiceBase(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def accessibility_action(self, stream: 'grpclib.server.Stream[idb_pb2.AccessibilityActionRequest, idb_pb2.AccessibilityActionResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
     async def focus(self, stream: 'grpclib.server.Stream[idb_pb2.FocusRequest, idb_pb2.FocusResponse]') -> None:
         pass
 
@@ -253,6 +257,12 @@ class CompanionServiceBase(abc.ABC):
                 grpclib.const.Cardinality.UNARY_UNARY,
                 idb_pb2.AccessibilityInfoRequest,
                 idb_pb2.AccessibilityInfoResponse,
+            ),
+            '/idb.CompanionService/accessibility_action': grpclib.const.Handler(
+                self.accessibility_action,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                idb_pb2.AccessibilityActionRequest,
+                idb_pb2.AccessibilityActionResponse,
             ),
             '/idb.CompanionService/focus': grpclib.const.Handler(
                 self.focus,
@@ -535,6 +545,12 @@ class CompanionServiceStub:
             '/idb.CompanionService/accessibility_info',
             idb_pb2.AccessibilityInfoRequest,
             idb_pb2.AccessibilityInfoResponse,
+        )
+        self.accessibility_action = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/idb.CompanionService/accessibility_action',
+            idb_pb2.AccessibilityActionRequest,
+            idb_pb2.AccessibilityActionResponse,
         )
         self.focus = grpclib.client.UnaryUnaryMethod(
             channel,

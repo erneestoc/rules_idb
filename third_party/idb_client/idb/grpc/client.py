@@ -35,6 +35,8 @@ from idb.common.hid import (
     key_press_to_events,
     multi_tap_to_events,
     pinch_to_events,
+    rotate_to_events,
+    shake_to_events,
     swipe_to_events,
     tap_to_events,
     text_to_events,
@@ -44,6 +46,12 @@ from idb.common.stream import stream_map
 from idb.common.tar import create_tar, drain_untar, generate_tar
 from idb.common.types import (
     AccessibilityInfo,
+    AccessibilityInfoOptions,
+    AccessibilityMarker,
+    AccessibilityPoint,
+    AccessibilityScrollDirection,
+    AccessibilitySearchableKey,
+    AccessibilityTarget,
     Address,
     AppProcessState,
     Client as ClientBase,
@@ -61,6 +69,7 @@ from idb.common.types import (
     FileListing,
     HIDButtonType,
     HIDEvent,
+    HIDOrientationType,
     IdbConnectionException,
     IdbException,
     InstalledAppInfo,
@@ -85,6 +94,7 @@ from idb.grpc.file import container_to_grpc as file_container_to_grpc
 from idb.grpc.hid import event_to_grpc
 from idb.grpc.idb_grpc import CompanionServiceStub
 from idb.grpc.idb_pb2 import (
+    AccessibilityActionRequest,
     AccessibilityInfoRequest,
     AddMediaRequest,
     ANY as AnySetting,
@@ -112,7 +122,6 @@ from idb.grpc.idb_pb2 import (
     OpenUrlRequest,
     Payload,
     PhotosClearRequest,
-    Point,
     PullRequest,
     PushRequest,
     RecordRequest,
@@ -491,20 +500,94 @@ class Client(ClientBase):
 
     @log_and_handle_exceptions("accessibility_info")
     async def accessibility_info(
-        self, point: tuple[int, int] | None, nested: bool
+        self,
+        target: AccessibilityTarget | None,
+        options: AccessibilityInfoOptions,
     ) -> AccessibilityInfo:
-        grpc_point = Point(x=point[0], y=point[1]) if point is not None else None
-        response = await self.stub.accessibility_info(
-            AccessibilityInfoRequest(
-                point=grpc_point,
-                format=(
-                    AccessibilityInfoRequest.NESTED
-                    if nested
-                    else AccessibilityInfoRequest.LEGACY
-                ),
-            )
+        if options.format is not None:
+            wire_format = options.format.value
+        elif options.nested:
+            wire_format = AccessibilityInfoRequest.NESTED
+        else:
+            wire_format = AccessibilityInfoRequest.LEGACY
+        request = AccessibilityInfoRequest(
+            format=wire_format,
+            keys=options.keys or [],
+            profile=options.profile,
+            collect_frame_coverage=options.collect_frame_coverage,
         )
+        # Unset means "unspecified" on the wire: the companion's historical
+        # default backend, and the only thing an older companion understands.
+        if options.backend is not None:
+            request.backend = options.backend.value
+        if isinstance(target, AccessibilityMarker):
+            request.marker = target.value
+            request.match_key = target.match_key.value
+            request.depth = target.depth
+        elif isinstance(target, AccessibilityPoint):
+            request.point.x = target.x
+            request.point.y = target.y
+        response = await self.stub.accessibility_info(request)
         return AccessibilityInfo(json=response.json)
+
+    @log_and_handle_exceptions("accessibility_tap")
+    async def accessibility_tap(
+        self,
+        target: AccessibilityTarget,
+        expected_value: str | None = None,
+        expected_key: AccessibilitySearchableKey = AccessibilitySearchableKey.LABEL,
+    ) -> None:
+        request = AccessibilityActionRequest(
+            tap=AccessibilityActionRequest.Tap(
+                check_expected_value=expected_value is not None,
+                expected_value=expected_value or "",
+                expected_key=expected_key.value,
+            ),
+        )
+        if isinstance(target, AccessibilityMarker):
+            request.marker = target.value
+            request.match_key = target.match_key.value
+            request.depth = target.depth
+        elif isinstance(target, AccessibilityPoint):
+            request.point.x = target.x
+            request.point.y = target.y
+        await self.stub.accessibility_action(request)
+
+    @log_and_handle_exceptions("accessibility_scroll")
+    async def accessibility_scroll(
+        self,
+        target: AccessibilityTarget | None,
+        direction: AccessibilityScrollDirection,
+    ) -> None:
+        request = AccessibilityActionRequest(
+            scroll=AccessibilityActionRequest.Scroll(direction=direction.value),
+        )
+        if isinstance(target, AccessibilityMarker):
+            request.marker = target.value
+            request.match_key = target.match_key.value
+            request.depth = target.depth
+        elif isinstance(target, AccessibilityPoint):
+            request.point.x = target.x
+            request.point.y = target.y
+        await self.stub.accessibility_action(request)
+
+    @log_and_handle_exceptions("accessibility_set_value")
+    async def accessibility_set_value(
+        self,
+        target: AccessibilityTarget,
+        value: str,
+    ) -> None:
+        request = AccessibilityActionRequest(
+            set_value=AccessibilityActionRequest.SetValue(value=value),
+        )
+        if isinstance(target, AccessibilityMarker):
+            request.marker = target.value
+            request.match_key = target.match_key.value
+            request.depth = target.depth
+        elif isinstance(target, AccessibilityPoint):
+            request.point.x = target.x
+            request.point.y = target.y
+        await self.stub.accessibility_action(request)
 
     @log_and_handle_exceptions("add_media")
     async def add_media(self, file_paths: list[str]) -> None:
@@ -909,6 +992,14 @@ class Client(ClientBase):
         await self.send_events(button_press_to_events(button_type, duration))
 
     @log_and_handle_exceptions("hid")
+    async def rotate(self, orientation: HIDOrientationType) -> None:
+        await self.send_events(rotate_to_events(orientation))
+
+    @log_and_handle_exceptions("hid")
+    async def shake(self) -> None:
+        await self.send_events(shake_to_events())
+
+    @log_and_handle_exceptions("hid")
     async def key(self, keycode: int, duration: float | None = None) -> None:
         await self.send_events(key_press_to_events(keycode, duration))
 
@@ -1086,6 +1177,7 @@ class Client(ClientBase):
         wait_for_debugger: bool = False,
         stop: asyncio.Event | None = None,
         pid_file: str | None = None,
+        enable_repl: bool = False,
     ) -> None:
         async with self.stub.launch.open() as stream:
             request = LaunchRequest(
@@ -1096,6 +1188,7 @@ class Client(ClientBase):
                     foreground_if_running=foreground_if_running,
                     wait_for_debugger=wait_for_debugger,
                     wait_for=True if stop else False,
+                    enable_repl=enable_repl,
                 )
             )
             await stream.send_message(request)
@@ -1346,24 +1439,6 @@ class Client(ClientBase):
             yield message
 
     @log_and_handle_exceptions("setting")
-    async def set_hardware_keyboard(self, enabled: bool) -> None:
-        await self.stub.setting(
-            SettingRequest(
-                hardwareKeyboard=SettingRequest.HardwareKeyboard(enabled=enabled)
-            )
-        )
-
-    @log_and_handle_exceptions("setting")
-    async def set_locale(self, locale_identifier: str) -> None:
-        await self.stub.setting(
-            SettingRequest(
-                stringSetting=SettingRequest.StringSetting(
-                    setting=LocaleSetting, value=locale_identifier
-                )
-            )
-        )
-
-    @log_and_handle_exceptions("setting")
     async def set_preference(
         self, name: str, value: str, value_type: str, domain: str | None
     ) -> None:
@@ -1379,11 +1454,6 @@ class Client(ClientBase):
                 )
             )
         )
-
-    @log_and_handle_exceptions("get_setting")
-    async def get_locale(self) -> str:
-        response = await self.stub.get_setting(GetSettingRequest(setting=LocaleSetting))
-        return response.value
 
     @log_and_handle_exceptions("get_setting")
     async def get_preference(self, name: str, domain: str | None) -> str:

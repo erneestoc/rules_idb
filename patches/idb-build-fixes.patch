@@ -1,8 +1,8 @@
 diff --git a/Companion/Reporting/FBiOSTargetDescription.swift b/Companion/Reporting/FBiOSTargetDescription.swift
-index e4bdf57..4ae6f1a 100644
+index 82599f4..3332edb 100644
 --- a/Companion/Reporting/FBiOSTargetDescription.swift
 +++ b/Companion/Reporting/FBiOSTargetDescription.swift
-@@ -53,8 +53,8 @@ import Foundation
+@@ -49,8 +49,8 @@ final class FBiOSTargetDescription: NSObject, FBiOSTargetInfo {
        Self.keyModel: model as Any? ?? NSNull(),
        Self.keyName: name as Any? ?? NSNull(),
        Self.keyOSVersion: osVersion.name as Any? ?? NSNull(),
@@ -14,10 +14,10 @@ index e4bdf57..4ae6f1a 100644
      ]
      for (key, value) in extendedInformation {
 diff --git a/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
-index 711e9e1..e91451b 100644
+index ed4a6a8..c67f1e4 100644
 --- a/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
 +++ b/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
-@@ -23,8 +23,8 @@ struct DescribeMethodHandler {
+@@ -24,8 +24,8 @@ struct DescribeMethodHandler {
        $0.targetDescription = .with {
          $0.udid = target.udid
          $0.name = target.name
@@ -29,7 +29,7 @@ index 711e9e1..e91451b 100644
          if let screenInfo = target.screenInfo {
            $0.screenDimensions = .with {
 diff --git a/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
-index e31f12a..2e966c6 100644
+index 06d44bb..725f128 100644
 --- a/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
 +++ b/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
 @@ -11,6 +11,30 @@ import Foundation
@@ -39,7 +39,7 @@ index e31f12a..2e966c6 100644
 +/// Owns the single AsyncIterator of a gRPC request stream. grpc-swift's
 +/// GRPCAsyncRequestStream traps if more than one iterator is ever created,
 +/// so every read for one RPC must go through the same instance.
-+private final class SingleIteratorRequestStream<S: AsyncSequence> {
++private final class SingleIteratorRequestStream<S: AsyncSequence>: @unchecked Sendable {
 +  private var iterator: S.AsyncIterator
 +
 +  init(_ sequence: S) {
@@ -60,10 +60,10 @@ index e31f12a..2e966c6 100644
 +  }
 +}
 +
- struct InstallMethodHandler {
+ struct InstallMethodHandler: @unchecked Sendable {
  
    let commandExecutor: FBIDBCommandExecutor
-@@ -18,7 +42,8 @@ struct InstallMethodHandler {
+@@ -18,7 +42,8 @@ struct InstallMethodHandler: @unchecked Sendable {
  
    func handle(requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_InstallResponse>, context: GRPCAsyncServerCallContext) async throws {
  
@@ -73,7 +73,7 @@ index e31f12a..2e966c6 100644
  
      let response = Idb_InstallResponse.with {
        $0.name = artifact.name
-@@ -27,7 +52,7 @@ struct InstallMethodHandler {
+@@ -27,7 +52,7 @@ struct InstallMethodHandler: @unchecked Sendable {
      try await responseStream.send(response)
    }
  
@@ -82,7 +82,7 @@ index e31f12a..2e966c6 100644
  
      func extractPayloadFromRequest() throws -> Idb_Payload {
        guard let payload = request.extractPayload() else {
-@@ -36,34 +61,34 @@ struct InstallMethodHandler {
+@@ -36,34 +61,34 @@ struct InstallMethodHandler: @unchecked Sendable {
        return payload
      }
  
@@ -123,10 +123,10 @@ index e31f12a..2e966c6 100644
      }
  
      var linkToBundle: FBDsymInstallLinkToBundle?
-@@ -71,12 +96,12 @@ struct InstallMethodHandler {
+@@ -71,12 +96,12 @@ struct InstallMethodHandler: @unchecked Sendable {
      // (2022-03-02) REMOVE! Keeping only for retrocompatibility
      if case let .bundleID(id) = request.value {
-       linkToBundle = .init(id, bundle_type: .app)
+       linkToBundle = .init(bundleID: id, bundleType: .app)
 -      request = try await requestStream.requiredNext
 +      request = try await stream.requiredNext
      }
@@ -138,7 +138,7 @@ index e31f12a..2e966c6 100644
      }
  
      var payload = try extractPayloadFromRequest()
-@@ -84,14 +109,14 @@ struct InstallMethodHandler {
+@@ -84,14 +109,14 @@ struct InstallMethodHandler: @unchecked Sendable {
      var compression = FBCompressionFormat.GZIP
      if case let .compression(format) = payload.source {
        compression = readCompressionFormat(from: format)
@@ -155,7 +155,7 @@ index e31f12a..2e966c6 100644
        name: name,
        makeDebuggable: makeDebuggable,
        linkToBundle: linkToBundle,
-@@ -103,7 +128,7 @@ struct InstallMethodHandler {
+@@ -103,7 +128,7 @@ struct InstallMethodHandler: @unchecked Sendable {
    private func installData(
      from source: Idb_Payload.OneOf_Source?,
      to destination: Idb_InstallRequest.Destination,
@@ -164,38 +164,128 @@ index e31f12a..2e966c6 100644
      name: String,
      makeDebuggable: Bool,
      linkToBundle: FBDsymInstallLinkToBundle?,
-@@ -131,7 +156,7 @@ struct InstallMethodHandler {
+@@ -134,14 +159,14 @@ struct InstallMethodHandler: @unchecked Sendable {
+       if destination == .app && isZipArchive(data) {
+         return try await installZipArchive(
+           initial: data,
+-          requestStream: requestStream,
++          stream: stream,
+           makeDebuggable: makeDebuggable,
+           overrideModificationTime: overrideModificationTime)
+       }
  
-     switch source {
-     case let .data(data):
--      let dataStream = pipeToInputOutput(initial: data, requestStream: requestStream) as! FBProcessInput<AnyObject>
-+      let dataStream = pipeToInputOutput(initial: data, stream: stream) as! FBProcessInput<AnyObject>
-       return try await installSource(dataStream: dataStream, skipSigningBundles: skipSigningBundles)
+       let input = FBProcessInput<OutputStream>.fromStream()
+       let output = input.contents
+-      async let writePayload: Void = writePayload(initial: data, requestStream: requestStream, output: output)
++      async let writePayload: Void = writePayload(initial: data, stream: stream, output: output)
+       let artifact = try await installSource(
+         dataStream: unsafeBitCast(input, to: FBProcessInput<AnyObject>.self),
+         skipSigningBundles: skipSigningBundles)
+@@ -184,7 +209,7 @@ struct InstallMethodHandler: @unchecked Sendable {
  
-     case let .url(urlString):
-@@ -164,7 +189,7 @@ struct InstallMethodHandler {
+   private func installZipArchive(
+     initial: Data,
+-    requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>,
++    stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_InstallRequest>>,
+     makeDebuggable: Bool,
+     overrideModificationTime: Bool
+   ) async throws -> FBInstalledArtifact {
+@@ -199,7 +224,7 @@ struct InstallMethodHandler: @unchecked Sendable {
+     let file = try FileHandle(forWritingTo: archiveURL)
+     do {
+       try file.write(contentsOf: initial)
+-      for try await request in requestStream {
++      while let request = try await stream.next() {
+         guard let data = request.extractDataFrame() else {
+           continue
+         }
+@@ -219,14 +244,14 @@ struct InstallMethodHandler: @unchecked Sendable {
+ 
+   private func writePayload(
+     initial: Data,
+-    requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>,
++    stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_InstallRequest>>,
+     output: OutputStream
+   ) async throws {
+     output.open()
+     defer { output.close() }
+ 
+     try write(initial, to: output)
+-    for try await request in requestStream {
++    while let request = try await stream.next() {
+       guard let data = request.extractDataFrame() else {
+         continue
+       }
+diff --git a/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift
+index 7cfd41c..db1a2a5 100644
+--- a/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift
+@@ -77,14 +77,20 @@ struct LaunchMethodHandler: @unchecked Sendable {
+ 
+     try await launchedApp.terminate()
+ 
+-    try await withThrowingTaskGroup(of: Void.self) { group in
+-      for consumer in consumers {
+-        nonisolated(unsafe) let consumer = consumer
+-        group.addTask {
+-          try await consumer.awaitFinishedConsumingAsync()
+-        }
++    // Built as a plain Task array (rather than a TaskGroup) with an explicit
++    // Task<Void, Error> generic argument: withThrowingTaskGroup's addTask
++    // triggers a spurious "sending" data-race diagnostic on this closure
++    // under the current toolchain even with a nonisolated(unsafe) rebind,
++    // while the explicitly-typed Task initializer does not.
++    let consumerTasks: [Task<Void, Error>] = consumers.map { consumer in
++      nonisolated(unsafe) let consumer = consumer
++      nonisolated(unsafe) let awaitConsumed: @Sendable () async throws -> Void = {
++        try await consumer.awaitFinishedConsumingAsync()
+       }
+-      try await group.waitForAll()
++      return Task<Void, Error>.detached(operation: awaitConsumed)
++    }
++    for task in consumerTasks {
++      _ = try await task.value
      }
    }
  
--  private func pipeToInputOutput(initial: Data, requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>) -> FBProcessInput<OutputStream> {
-+  private func pipeToInputOutput(initial: Data, stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_InstallRequest>>) -> FBProcessInput<OutputStream> {
-     let input = FBProcessInput<OutputStream>.fromStream()
-     let appStream = input.contents
-     Task {
-@@ -175,7 +200,7 @@ struct InstallMethodHandler {
-       appStream.write(&buffer, maxLength: buffer.count)
+diff --git a/Companion/SwiftServer/MethodHandlers/LogMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/LogMethodHandler.swift
+index fb88d3b..eb6a416 100644
+--- a/Companion/SwiftServer/MethodHandlers/LogMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/LogMethodHandler.swift
+@@ -51,9 +51,10 @@ struct LogMethodHandler: @unchecked Sendable {
+     // `operation` is a thread-safe handle but not Sendable; rebind as
+     // nonisolated(unsafe) so the observer Task can capture it.
+     nonisolated(unsafe) let operationToObserve = operation
+-    let observeOperationCompletion = Task<Void, Error> {
++    nonisolated(unsafe) let observeCompletion: () async throws -> Void = {
+       try await operationToObserve.waitUntilCompleted()
+     }
++    let observeOperationCompletion = Task<Void, Error>(operation: observeCompletion)
+     try await Task.select(observeWritingDone, observeOperationCompletion).value
+     writingDone.resolve(())
  
-       do {
--        for try await request in requestStream {
-+        while let request = try await stream.next() {
-           guard let data = request.extractDataFrame() else {
-             continue
-           }
+diff --git a/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift b/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift
+index 066369c..b6fcddb 100644
+--- a/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift
++++ b/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift
+@@ -169,10 +169,11 @@ final class ReplSocketClient: @unchecked Sendable {
+     let box = Box()
+     let semaphore = DispatchSemaphore(value: 0)
+     nonisolated(unsafe) let commandHandler = handler
+-    Task {
++    nonisolated(unsafe) let runCommand: @Sendable () async -> Void = {
+       box.value = await commandHandler(commandData)
+       semaphore.signal()
+     }
++    Task<Void, Never>.detached(operation: runCommand)
+     semaphore.wait()
+     return box.value
+   }
 diff --git a/Companion/main.swift b/Companion/main.swift
-index 66bec15..e874e40 100644
+index 0e47def..abdef27 100644
 --- a/Companion/main.swift
 +++ b/Companion/main.swift
-@@ -350,7 +350,7 @@ private func runCompanionServer(_ udid: String, userDefaults: UserDefaults, xcod
+@@ -382,7 +382,7 @@ private func runCompanionServer(_ udid: String, userDefaults: UserDefaults, xcod
        addMetadataSel,
        with: [
          "udid": udid,
@@ -204,44 +294,24 @@ index 66bec15..e874e40 100644
        ])
    }
    reporter.report(FBEventReporterSubject(forEvent: "launched"))
-diff --git a/Companion/project.yml b/Companion/project.yml
-index 9f3e841..174b4ea 100644
---- a/Companion/project.yml
-+++ b/Companion/project.yml
-@@ -42,6 +42,24 @@ packages:
-     from: 1.3.0
- 
- targets:
-+  ReplProtocol:
-+    type: framework
-+    platform: macOS
-+    deploymentTarget: "12.0"
-+    sources:
-+      - path: ../REPL/ReplProtocol
-+    settings:
-+      base:
-+        MACOSX_DEPLOYMENT_TARGET: "12.0"
-+        PRODUCT_BUNDLE_IDENTIFIER: com.facebook.ReplProtocol
-+        PRODUCT_NAME: ReplProtocol
-+        DEFINES_MODULE: YES
-+        MACH_O_TYPE: staticlib
-+        SWIFT_VERSION: "6.0"
-+        GENERATE_INFOPLIST_FILE: YES
-+    dependencies:
-+      - sdk: Foundation.framework
-+
-   IDBGRPCSwift:
-     type: framework
-     platform: macOS
-@@ -168,6 +186,8 @@ targets:
-         embed: false
-       - target: IDBGRPCSwift
-         embed: false
-+      - target: ReplProtocol
-+        embed: false
-       - sdk: Foundation.framework
- 
-   # The `idb-repl` CLI (Buck: fbsource//fbobjc/Tools/idb:idb-repl). A small gRPC
+@@ -464,7 +464,16 @@ private func runCompanionServer(_ udid: String, userDefaults: UserDefaults, xcod
+   }
+   if terminateOffline {
+     nonisolated(unsafe) let target = target
+-    raceTasks.append(Task { try await awaitTargetOffline(target, logger: logger) })
++    nonisolated(unsafe) let logger = logger
++    nonisolated(unsafe) let awaitOffline: @Sendable () async throws -> Void = { try await awaitTargetOffline(target, logger: logger) }
++    // Task.detached rather than Task { }: the current toolchain's "sending"
++    // region checker false-positives on this closure when constructed via
++    // the ordinary (context-inheriting) initializer even after the
++    // nonisolated(unsafe) rebind above; detaching sidesteps that inherited-
++    // isolation code path. No behavioral loss here — the closure only awaits
++    // a plain async call with already-captured values, it doesn't depend on
++    // the caller's actor context.
++    raceTasks.append(Task<Void, Error>.detached(operation: awaitOffline))
+   }
+   defer { raceTasks.forEach { $0.cancel() } }
+   _ = try await Task.select(raceTasks).value
 diff --git a/FBControlCore/Management/FBiOSTarget.h b/FBControlCore/Management/FBiOSTarget.h
 index 206a889..21152dc 100644
 --- a/FBControlCore/Management/FBiOSTarget.h
@@ -265,7 +335,7 @@ index 206a889..21152dc 100644
  /**
   A Default Comparison Function that can be called for different implementations of FBiOSTarget.
 diff --git a/FBControlCore/Management/FBiOSTarget.swift b/FBControlCore/Management/FBiOSTarget.swift
-index 05ba57b..27fcdea 100644
+index 75373fa..1e7a36d 100644
 --- a/FBControlCore/Management/FBiOSTarget.swift
 +++ b/FBControlCore/Management/FBiOSTarget.swift
 @@ -108,7 +108,7 @@ import Foundation
@@ -295,11 +365,71 @@ index 05ba57b..27fcdea 100644
  }
  
  /// Constructs an NSPredicate matching the specified UDID.
+diff --git a/FBSimulatorControl/Commands/FBAXBridgeTransport.swift b/FBSimulatorControl/Commands/FBAXBridgeTransport.swift
+index aaed76f..0af31d2 100644
+--- a/FBSimulatorControl/Commands/FBAXBridgeTransport.swift
++++ b/FBSimulatorControl/Commands/FBAXBridgeTransport.swift
+@@ -144,31 +144,33 @@ struct FBAXBridgeOneshotTransport: FBAXBridgeTransport {
+   let simulator: FBSimulator
+ 
+   func read(pid: pid_t, maxDepth: Int, maxNodes: Int, attributes: [String]?, explainUnreachable: Bool, traversal: FBAXTraversal, automationMode: Bool?) async throws -> Data {
+-    try await spawn(
+-      ["accessibility", FBAXWire.Verb.describe.rawValue]
+-        + FBAXWire.Request.pid.argument("\(pid)")
+-        + FBAXWire.Request.maxDepth.argument("\(maxDepth)")
+-        + FBAXWire.Request.maxNodes.argument("\(maxNodes)")
+-        + Self.attributeArgument(attributes)
+-        + Self.explainArgument(explainUnreachable)
+-        + Self.traversalArgument(traversal)
+-        + Self.automationArgument(automationMode)
+-    )
++    // Built up statement-by-statement (rather than as one large `+`-chained
++    // expression) so the type checker doesn't time out resolving the mix of
++    // string-interpolation and [String]-returning helper calls.
++    var arguments: [String] = ["accessibility", FBAXWire.Verb.describe.rawValue]
++    arguments += FBAXWire.Request.pid.argument("\(pid)")
++    arguments += FBAXWire.Request.maxDepth.argument("\(maxDepth)")
++    arguments += FBAXWire.Request.maxNodes.argument("\(maxNodes)")
++    arguments += Self.attributeArgument(attributes)
++    arguments += Self.explainArgument(explainUnreachable)
++    arguments += Self.traversalArgument(traversal)
++    arguments += Self.automationArgument(automationMode)
++    return try await spawn(arguments)
+   }
+ 
+   func readFrontmost(x: Double, y: Double, maxDepth: Int, maxNodes: Int, method: FBAXBridgeFrontmostMethod, attributes: [String]?, explainUnreachable: Bool, traversal: FBAXTraversal, automationMode: Bool?) async throws -> Data {
+-    try await spawn(
+-      ["accessibility", FBAXWire.Verb.describe.rawValue]
+-        + FBAXWire.Request.x.argument("\(x)")
+-        + FBAXWire.Request.y.argument("\(y)")
+-        + FBAXWire.Request.maxDepth.argument("\(maxDepth)")
+-        + FBAXWire.Request.maxNodes.argument("\(maxNodes)")
+-        + FBAXWire.Request.method.argument(method.rawValue)
+-        + Self.attributeArgument(attributes)
+-        + Self.explainArgument(explainUnreachable)
+-        + Self.traversalArgument(traversal)
+-        + Self.automationArgument(automationMode)
+-    )
++    // See `read(pid:...)` above for why this is built up statement-by-statement.
++    var arguments: [String] = ["accessibility", FBAXWire.Verb.describe.rawValue]
++    arguments += FBAXWire.Request.x.argument("\(x)")
++    arguments += FBAXWire.Request.y.argument("\(y)")
++    arguments += FBAXWire.Request.maxDepth.argument("\(maxDepth)")
++    arguments += FBAXWire.Request.maxNodes.argument("\(maxNodes)")
++    arguments += FBAXWire.Request.method.argument(method.rawValue)
++    arguments += Self.attributeArgument(attributes)
++    arguments += Self.explainArgument(explainUnreachable)
++    arguments += Self.traversalArgument(traversal)
++    arguments += Self.automationArgument(automationMode)
++    return try await spawn(arguments)
+   }
+ 
+   func hitTest(x: Double, y: Double, attributes: [String]?) async throws -> Data {
 diff --git a/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift b/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift
-index 841b8f0..c392ed4 100644
+index e09d935..b3fe268 100644
 --- a/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift
 +++ b/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift
-@@ -26,7 +26,7 @@ enum DefaultsModificationError: Error, CustomStringConvertible {
+@@ -25,7 +25,7 @@ enum DefaultsModificationError: Error, CustomStringConvertible {
      case let .couldNotWritePlist(plist):
        return "Failed to write out defaults to temporary file \(plist)"
      case let .invalidState(state, action):
@@ -307,15 +437,15 @@ index 841b8f0..c392ed4 100644
 +      return "Cannot \(action) a plist when the Simulator state is \(FBiOSTargetStateStringRepresentation(state)), should be \(FBiOSTargetStateString.shutdown) or \(FBiOSTargetStateString.booted)"
      case let .commandFailed(command, exitCode, stderr):
        return "defaults \(command) failed with exit code \(exitCode): \(stderr)"
-     }
+     case .noDataDirectory:
 diff --git a/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift b/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift
-index eb13025..73bcb45 100644
+index 461f41f..4b49da2 100644
 --- a/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift
 +++ b/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift
-@@ -50,7 +50,7 @@ class FBSimulatorControlTests_SimDevice_Double: NSObject {
+@@ -54,7 +54,7 @@ class FBSimulatorControlTests_SimDevice_Double: NSObject {
    }
  
-   var stateString: FBiOSTargetStateString {
+   @objc var stateString: FBiOSTargetStateString {
 -    return FBiOSTargetStateStringFromState(FBiOSTargetState(rawValue: UInt(state))!)
 +    return FBiOSTargetStateStringRepresentation(FBiOSTargetState(rawValue: UInt(state))!)
    }
@@ -358,10 +488,10 @@ index 8b72a3f..1663e05 100644
  
    XCTCapabilitiesBuilder *capabilitiesBuilder = [objc_lookUpClass("XCTCapabilitiesBuilder") new];
 diff --git a/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift b/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
-index d1f393f..ee09d18 100644
+index 3276f56..ba7b6bc 100644
 --- a/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
 +++ b/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
-@@ -110,6 +110,11 @@ public class FBTestRunnerConfiguration: NSObject, NSCopying {
+@@ -96,6 +96,11 @@ public struct FBTestRunnerConfiguration {
        (developerLibraryPath as NSString).appendingPathComponent("Frameworks"),
        (developerLibraryPath as NSString).appendingPathComponent("PrivateFrameworks"),
        platformDeveloperFrameworksPath,
@@ -373,7 +503,7 @@ index d1f393f..ee09d18 100644
      ]
  
      let automationFrameworkPath = (developerLibraryPath as NSString).appendingPathComponent("PrivateFrameworks/XCTAutomationSupport.framework")
-@@ -158,7 +163,10 @@ public class FBTestRunnerConfiguration: NSObject, NSCopying {
+@@ -142,7 +147,10 @@ public struct FBTestRunnerConfiguration {
          targetApplicationBundleID: testLaunchConfiguration.targetApplicationBundle?.identifier,
          testApplicationDependencies: testApplicationDependencies,
          automationFrameworkPath: automationFrameworkPathOrNil,
@@ -384,12 +514,12 @@ index d1f393f..ee09d18 100644
 +        testExecutionOrdering: testLaunchConfiguration.applicationLaunchConfiguration.environment["FB_XCTEST_EXECUTION_ORDERING"] == "random" ? 1 : 0
        )
      } catch {
-       return unsafeBitCast(
+       throw
 diff --git a/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift b/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift
-index 9494cd3..c9cf7a6 100644
+index 4aa5eaa..8fb685b 100644
 --- a/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift
 +++ b/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift
-@@ -85,7 +85,15 @@ import Foundation
+@@ -61,7 +61,15 @@ public final class FBManagedTestRunStrategy {
    private static func environment(fromConfiguration configuration: FBTestRunnerConfiguration, environment: [String: String]) -> [String: String] {
      var mEnvironment = configuration.launchEnvironment
      for (key, value) in environment {
@@ -406,17 +536,32 @@ index 9494cd3..c9cf7a6 100644
      }
      return mEnvironment
    }
+diff --git a/XCTestBootstrap/TestManager/FBRemoteInvoking.swift b/XCTestBootstrap/TestManager/FBRemoteInvoking.swift
+index d2a63aa..1733c2e 100644
+--- a/XCTestBootstrap/TestManager/FBRemoteInvoking.swift
++++ b/XCTestBootstrap/TestManager/FBRemoteInvoking.swift
+@@ -217,8 +217,8 @@ func awaitRemoteReceipt(
+           // this call site, so the already-declared transfer is restated locally. Delete
+           // this binding once toolchains honor the declaration again.
+           // patternlint-disable-next-line swift-nonisolated-unsafe
+-          nonisolated(unsafe) let value = value
+-          bridge.resolve(.success(value))
++          nonisolated(unsafe) let outcome: Result<Any?, Error> = .success(value)
++          bridge.resolve(outcome)
+         }
+       }
+     }
 diff --git a/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift b/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift
-index 860ec5e..1c2a773 100644
+index 7945ff8..82730fd 100644
 --- a/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift
 +++ b/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift
-@@ -178,7 +178,14 @@ public final class FBTestManagerAPIMediator: NSObject, @unchecked Sendable {
+@@ -167,7 +167,14 @@ public final class FBTestManagerAPIMediator: NSObject, @unchecked Sendable {
      }
      logger.log("Terminating processes spawned due to test bundle requests: \(appsToKill.map(\.bundleID))")
      for app in appsToKill {
--      try await asyncTarget.killApplication(bundleID: app.bundleID)
+-      try await target.killApplication(bundleID: app.bundleID)
 +      do {
-+        try await asyncTarget.killApplication(bundleID: app.bundleID)
++        try await target.killApplication(bundleID: app.bundleID)
 +      } catch {
 +        // The app may already have exited (e.g. the test terminated it, or
 +        // it quit when the session ended); failing to kill it during
@@ -426,29 +571,3 @@ index 860ec5e..1c2a773 100644
      }
    }
  
-diff --git a/protoc_compiler_template.py b/protoc_compiler_template.py
-index 5d9522b..75f8d6e 100755
---- a/protoc_compiler_template.py
-+++ b/protoc_compiler_template.py
-@@ -3,17 +3,11 @@
- # This source code is licensed under the MIT license found in the
- # LICENSE file in the root directory of this source tree.
- 
--# EASY-INSTALL-ENTRY-SCRIPT: 'grpclib==0.4.1','console_scripts','protoc-gen-python_grpc'
--__requires__ = "grpclib==0.4.1"
--import re
-+# Invokes the grpclib protoc plugin directly; the pkg_resources-based
-+# entry-point loader this file used to contain was removed from setuptools.
- import sys
- 
--from pkg_resources import load_entry_point
-+from grpclib.plugin.main import main
- 
- if __name__ == "__main__":
--    sys.argv[0] = re.sub(r"(-script\.pyw?|\.exe)?$", "", sys.argv[0])
--    sys.exit(
--        load_entry_point(
--            "grpclib==0.4.1", "console_scripts", "protoc-gen-python_grpc"
--        )()
--    )
-+    sys.exit(main())

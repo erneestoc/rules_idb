@@ -55,6 +55,24 @@ ios_unit_test(
 )
 
 swift_library(
+    name = "AttachmentTestsLib",
+    testonly = True,
+    srcs = ["Tests/AttachmentTests.swift"],
+    module_name = "AttachmentTests",
+)
+
+# Scratch target for probing RULES_IDB_COLLECT_RESULT_BUNDLE: not part of
+# validate.sh, exercised ad hoc.
+ios_unit_test(
+    name = "AttachmentTests",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    test_host = ":HostApp",
+    deps = [":AttachmentTestsLib"],
+)
+
+swift_library(
     name = "FailingTestsLib",
     testonly = True,
     srcs = ["Tests/FailingTests.swift"],

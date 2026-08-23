@@ -18,8 +18,6 @@ from enum import Enum
 from io import StringIO
 from typing import IO, List, Optional, Set, Tuple, Union
 
-from python.migrations.py310 import StrEnum310
-
 
 LoggingMetadata = dict[str, Optional[Union[str, list[str], int, float]]]
 
@@ -42,10 +40,16 @@ class Permission(Enum):
     MICROPHONE = 6
 
 
-class TargetType(StrEnum310):
+class TargetType(str, Enum):
     DEVICE = "device"
     SIMULATOR = "simulator"
     MAC = "mac"
+
+    # enum.StrEnum is python 3.11+, and the client is installed onto older
+    # interpreters. These are the two assignments StrEnum makes over a str
+    # mixin: stringify and format as the value, not as "TargetType.DEVICE".
+    __str__ = str.__str__
+    __format__ = str.__format__
 
 
 @dataclass(frozen=True)
@@ -175,6 +179,104 @@ class FileListing:
 @dataclass(frozen=True)
 class AccessibilityInfo:
     json: str
+
+
+class AccessibilitySearchableKey(Enum):
+    LABEL = 0
+    UNIQUE_ID = 1
+    VALUE = 2
+    TITLE = 3
+    ROLE = 4
+    ROLE_DESCRIPTION = 5
+    SUBROLE = 6
+    HELP = 7
+    PLACEHOLDER = 8
+
+
+@dataclass(frozen=True)
+class AccessibilityPoint:
+    x: int
+    y: int
+
+
+@dataclass(frozen=True)
+class AccessibilityMarker:
+    value: str
+    match_key: AccessibilitySearchableKey = AccessibilitySearchableKey.LABEL
+    depth: int = 10
+
+
+# Selects an accessibility element to act on: a point or a marker (or None = the
+# whole screen / frontmost app). This union grows as accessibility commands land.
+AccessibilityTarget = Union[AccessibilityPoint, AccessibilityMarker]
+
+
+# CLI names (matching the sime2e vocabulary) for the accessibility searchable
+# keys, so the same marker/expected-value flags work across both CLIs.
+ACCESSIBILITY_KEY_BY_NAME: dict[str, AccessibilitySearchableKey] = {
+    "AXLabel": AccessibilitySearchableKey.LABEL,
+    "AXUniqueId": AccessibilitySearchableKey.UNIQUE_ID,
+    "AXValue": AccessibilitySearchableKey.VALUE,
+    "title": AccessibilitySearchableKey.TITLE,
+    "role": AccessibilitySearchableKey.ROLE,
+    "role_description": AccessibilitySearchableKey.ROLE_DESCRIPTION,
+    "subrole": AccessibilitySearchableKey.SUBROLE,
+    "help": AccessibilitySearchableKey.HELP,
+    "placeholder": AccessibilitySearchableKey.PLACEHOLDER,
+}
+
+
+# Which backend serves an accessibility read. Values match the wire protocol;
+# None on the options means "unspecified" — the companion's historical default
+# backend, and the only value an older companion understands.
+class AccessibilityBackend(Enum):
+    AX = 1
+    AXBRIDGE = 2
+    AXBRIDGE_PERSISTENT = 3
+
+
+ACCESSIBILITY_BACKEND_BY_NAME: dict[str, AccessibilityBackend] = {
+    "ax": AccessibilityBackend.AX,
+    "axbridge": AccessibilityBackend.AXBRIDGE,
+    "axbridge-persistent": AccessibilityBackend.AXBRIDGE_PERSISTENT,
+}
+
+
+# The output format of an accessibility read. Values match the wire protocol;
+# None on the options defers to the deprecated `nested` flag, preserving the
+# historical request shape.
+class AccessibilityOutputFormat(Enum):
+    LEGACY = 0
+    NESTED = 1
+    COMPLETE = 2
+
+
+ACCESSIBILITY_FORMAT_BY_NAME: dict[str, AccessibilityOutputFormat] = {
+    "default": AccessibilityOutputFormat.LEGACY,
+    "nested": AccessibilityOutputFormat.NESTED,
+    "complete": AccessibilityOutputFormat.COMPLETE,
+}
+
+
+# Shapes the accessibility_info request: the format, which accessibility
+# keys are reported, and which backend serves the read. This grows as
+# describe-all gains enrichers.
+@dataclass(frozen=True)
+class AccessibilityInfoOptions:
+    nested: bool = False
+    keys: list[str] | None = None
+    backend: AccessibilityBackend | None = None
+    format: AccessibilityOutputFormat | None = None
+    profile: bool = False
+    collect_frame_coverage: bool = False
+
+
+class AccessibilityScrollDirection(Enum):
+    UP = 0
+    DOWN = 1
+    LEFT = 2
+    RIGHT = 3
+    VISIBLE = 4
 
 
 @dataclass(frozen=True)
@@ -316,7 +418,24 @@ class HIDPinch:
     radius: float
 
 
-HIDEvent = Union[HIDPress, HIDSwipe, HIDDelay, HIDPinch]
+class HIDOrientationType(Enum):
+    PORTRAIT = 0
+    PORTRAIT_UPSIDE_DOWN = 1
+    LANDSCAPE_LEFT = 2
+    LANDSCAPE_RIGHT = 3
+
+
+@dataclass(frozen=True)
+class HIDOrientation:
+    orientation: HIDOrientationType
+
+
+@dataclass(frozen=True)
+class HIDShake:
+    pass
+
+
+HIDEvent = Union[HIDPress, HIDSwipe, HIDDelay, HIDPinch, HIDOrientation, HIDShake]
 
 
 @dataclass(frozen=True)
@@ -452,6 +571,7 @@ class Client(ABC):
         wait_for_debugger: bool = False,
         stop: asyncio.Event | None = None,
         pid_file: str | None = None,
+        enable_repl: bool = False,
     ) -> None:
         pass
 
@@ -559,21 +679,9 @@ class Client(ABC):
         pass
 
     @abstractmethod
-    async def set_hardware_keyboard(self, enabled: bool) -> None:
-        pass
-
-    @abstractmethod
-    async def set_locale(self, locale_identifier: str) -> None:
-        pass
-
-    @abstractmethod
     async def set_preference(
         self, name: str, value: str, value_type: str, domain: str | None
     ) -> None:
-        pass
-
-    @abstractmethod
-    async def get_locale(self) -> str:
         pass
 
     @abstractmethod
@@ -654,6 +762,14 @@ class Client(ABC):
         pass
 
     @abstractmethod
+    async def rotate(self, orientation: HIDOrientationType) -> None:
+        pass
+
+    @abstractmethod
+    async def shake(self) -> None:
+        pass
+
+    @abstractmethod
     async def key(self, keycode: int, duration: float | None = None) -> None:
         return
 
@@ -693,8 +809,35 @@ class Client(ABC):
 
     @abstractmethod
     async def accessibility_info(
-        self, point: tuple[int, int] | None, nested: bool
+        self,
+        target: AccessibilityTarget | None,
+        options: AccessibilityInfoOptions,
     ) -> AccessibilityInfo:
+        pass
+
+    @abstractmethod
+    async def accessibility_tap(
+        self,
+        target: AccessibilityTarget,
+        expected_value: str | None = None,
+        expected_key: AccessibilitySearchableKey = AccessibilitySearchableKey.LABEL,
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def accessibility_scroll(
+        self,
+        target: AccessibilityTarget | None,
+        direction: AccessibilityScrollDirection,
+    ) -> None:
+        pass
+
+    @abstractmethod
+    async def accessibility_set_value(
+        self,
+        target: AccessibilityTarget,
+        value: str,
+    ) -> None:
         pass
 
     @abstractmethod

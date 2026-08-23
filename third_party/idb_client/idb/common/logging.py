@@ -14,7 +14,6 @@ from collections.abc import Sequence
 from concurrent.futures import CancelledError
 from types import TracebackType
 from typing import Any, AsyncContextManager, Optional, Tuple, Type
-from uuid import uuid4
 
 import idb.common.plugin as plugin
 from idb.common.types import LoggingMetadata
@@ -32,7 +31,6 @@ def _initial_info(
         self_meta: LoggingMetadata | None = getattr(args[0], "metadata", None)
         if self_meta:
             _metadata.update(self_meta)
-    _metadata["event_uuid"] = str(uuid4())
     start = int(time.time())
     return (_metadata, start)
 
@@ -85,6 +83,14 @@ class log_call(AsyncContextManager[None]):
             try:
                 value = await function(*args, **kwargs)
                 logger.debug(f"{_name} succeeded")
+                result_metadata = plugin.on_invocation_result(
+                    name=_name, result=value, metadata=_metadata
+                )
+                if result_metadata:
+                    # Merge into a copy: _metadata may alias the decorator's
+                    # dict, which is shared across invocations of the same
+                    # function, and result tags belong to this one only.
+                    _metadata = {**_metadata, **result_metadata}
                 await plugin.after_invocation(
                     name=_name,
                     duration=int((time.time() - start) * 1000),
