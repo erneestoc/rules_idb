@@ -243,22 +243,34 @@ cleanup() {
   if [[ -n "$companion_sock_dir" ]]; then
     rm -rf "$companion_sock_dir"
   fi
-  # An abnormal exit (Bazel timeout SIGTERM -> 143, Ctrl-C -> 130) kills
-  # the in-flight test session; the simulator can be left wedged by it --
-  # still reporting Booted, but hanging every future session. Shut it down
-  # so the next claimant of this slot cold-boots clean; normal exits leave
-  # it warm. Bounded well inside Bazel's SIGTERM->SIGKILL grace.
+  # Simulator disposition on exit. An abnormal exit (Bazel timeout SIGTERM
+  # -> 143, Ctrl-C -> 130) kills the in-flight test session and can leave the
+  # simulator wedged (still Booted, but hanging every future session), so
+  # shut it down; otherwise trim over-warm slots (see below). A warm slot
+  # (0..warm_pool_size-1) that exited normally is left booted for reuse.
   local keep_session_marker=false
-  if [[ "$cleanup_exit_code" -eq 143 || "$cleanup_exit_code" -eq 130 ]] \
-      && [[ -n "${acquired_slot:-}" && -n "${simulator_id:-}" ]]; then
-    echo "note: terminated mid-run; shutting simulator $simulator_id down" >&2
-    # Confirm the shutdown before clearing the wedge evidence, bounded tight
-    # to stay within Bazel's SIGTERM->SIGKILL grace. If it cannot be
-    # confirmed the device may still carry a dead session, so keep the marker
-    # -- the next claimant of this slot recycles it. (If this cleanup is
-    # itself SIGKILLed mid-verify the marker simply survives, same outcome.)
-    if ! shutdown_and_verify "$simulator_id" 10 5; then
-      keep_session_marker=true
+  if [[ -n "${acquired_slot:-}" && -n "${simulator_id:-}" ]]; then
+    if [[ "$cleanup_exit_code" -eq 143 || "$cleanup_exit_code" -eq 130 ]]; then
+      echo "note: terminated mid-run; shutting simulator $simulator_id down" >&2
+      # Confirm the shutdown before clearing the wedge evidence, bounded tight
+      # to stay within Bazel's SIGTERM->SIGKILL grace. If it cannot be
+      # confirmed the device may still carry a dead session, so keep the marker
+      # -- the next claimant of this slot recycles it. (If this cleanup is
+      # itself SIGKILLed mid-verify the marker simply survives, same outcome.)
+      if ! shutdown_and_verify "$simulator_id" 10 5; then
+        keep_session_marker=true
+      fi
+    elif [[ "$acquired_slot" -ge "${warm_pool_size:-1}" \
+        && -z "${clean_up_simulator_action_binary:-}" ]]; then
+      # Trim over-warm slots (>= warm_pool_size) on any *catchable* exit, not
+      # just the post-test happy path: an early failure (staging/acquisition
+      # error) that never reaches the post-test trim would otherwise leak a
+      # booted simulator that only exists for a concurrency burst. Slots
+      # 0..warm_pool_size-1 stay warm for reuse. A custom cleanup action, when
+      # set, owns shutdown, so defer to it. SIGKILL is uncatchable; such a leak
+      # is recycled on the slot's next use and swept by tools/clean_simulators.sh.
+      echo "note: slot $acquired_slot >= warm pool size ${warm_pool_size:-1}; shutting simulator down" >&2
+      run_bounded 60 xcrun simctl shutdown "$simulator_id" >/dev/null 2>&1 || true
     fi
   fi
   if [[ -n "${session_marker:-}" && "$keep_session_marker" != true ]]; then
@@ -1270,10 +1282,9 @@ if [[ -n "$clean_up_simulator_action_binary" ]]; then
     "$clean_up_simulator_action_binary" 200>&- 201>&- || true
 elif [[ "$shutdown_after_test" == true || -n "${RULES_IDB_SHUTDOWN_SIMULATOR:-}" ]]; then
   run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
-elif [[ -n "${acquired_slot:-}" && "$acquired_slot" -ge "$warm_pool_size" ]]; then
-  echo "note: slot $acquired_slot >= warm pool size $warm_pool_size; shutting simulator down" >&2
-  run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
 fi
+# Over-warm slots (>= warm_pool_size) are trimmed in cleanup() so the trim
+# also covers early-failure exits, not just this happy path.
 
 if [[ "$post_action_determines_exit_code" == true ]]; then
   if [[ "$post_action_exit_code" -ne 0 ]]; then
