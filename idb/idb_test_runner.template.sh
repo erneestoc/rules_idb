@@ -13,6 +13,12 @@
 #   RULES_IDB_POOL_SIZE       max simulators per (device, os) pool
 #   RULES_IDB_SHUTDOWN_SIMULATOR  shut the simulator down after the run
 #   RULES_IDB_COLLECT_LOGS    collect idb run logs into undeclared outputs
+#   RULES_IDB_REPORT_ACTIVITIES  record XCTest activities so XCTAttachment
+#                             works instead of hard-failing (opt-in; costs
+#                             harness memory proportional to attachment size)
+#   RULES_IDB_COLLECT_RESULT_BUNDLE  emit an .xcresult (with attachment
+#                             payloads) into undeclared outputs; implies
+#                             RULES_IDB_REPORT_ACTIVITIES
 #   DEBUG_IDB_TEST_RUNNER     set -x tracing
 
 set -euo pipefail
@@ -987,6 +993,17 @@ else
 fi
 idb_cmd+=("--json")
 
+# Attachments and result bundles are opt-in: recording activities and building
+# an .xcresult makes the companion buffer attachment payloads, forfeiting most
+# of idb's memory advantage, so they stay off unless explicitly requested.
+# XCTAttachment hard-fails ("activities are disabled") without --report-activities.
+if [[ -n "${RULES_IDB_COLLECT_RESULT_BUNDLE:-}" && -n "${TEST_UNDECLARED_OUTPUTS_DIR:-}" ]]; then
+  idb_cmd+=("--report-activities")
+  idb_cmd+=("--result-bundle-path" "$TEST_UNDECLARED_OUTPUTS_DIR/test.xcresult")
+elif [[ -n "${RULES_IDB_REPORT_ACTIVITIES:-}" ]]; then
+  idb_cmd+=("--report-activities")
+fi
+
 if [[ ${#only_tests[@]} -gt 0 ]]; then
   idb_cmd+=("--tests-to-run" "${only_tests[@]}")
 fi
@@ -1139,6 +1156,15 @@ fi
 # subtract the in-simulator test time reported above to estimate install
 # and session-setup overhead.
 echo "note: timing stage=$(fmt_ms "$stage_ms") simulator=$(fmt_ms "$simulator_ms") companion=$(fmt_ms "$companion_ms") idb=$(fmt_ms "$idb_ms") total=$(fmt_ms $(( $(now_ms) - runner_start_ms )))" >&2
+
+# If a result bundle was requested, verify the companion actually produced one.
+# In idb's native (non-xcodebuild) test path, the .xcresult is not emitted by
+# every companion build, so warn rather than let the user assume it landed.
+if [[ -n "${RULES_IDB_COLLECT_RESULT_BUNDLE:-}" && -n "${TEST_UNDECLARED_OUTPUTS_DIR:-}" ]]; then
+  if [[ ! -e "$TEST_UNDECLARED_OUTPUTS_DIR/test.xcresult" ]]; then
+    echo "warning: RULES_IDB_COLLECT_RESULT_BUNDLE was set but the companion produced no .xcresult; this companion build does not emit a result bundle in the native test path. Test activities are still recorded in the idb JSON output; use RULES_IDB_REPORT_ACTIVITIES alone if you only need XCTAttachment to not hard-fail." >&2
+  fi
+fi
 
 if [[ "$parse_exit_code" -eq 70 ]]; then
   echo "error: some tests failed" >&2

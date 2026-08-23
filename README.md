@@ -136,7 +136,28 @@ the bundled binaries.
 Runtime environment overrides: `RULES_IDB_IDB_PATH`,
 `RULES_IDB_COMPANION_PATH`, `RULES_IDB_POOL_DIR`, `RULES_IDB_POOL_SIZE`,
 `RULES_IDB_SHUTDOWN_SIMULATOR`, `RULES_IDB_COLLECT_LOGS`,
+`RULES_IDB_REPORT_ACTIVITIES`, `RULES_IDB_COLLECT_RESULT_BUNDLE`,
 `DEBUG_IDB_TEST_RUNNER`.
+
+### Test attachments
+
+By default idb runs XCTest with activities disabled, so a test that calls
+`add(XCTAttachment(...))` **hard-fails** with "Attachments cannot be added to
+the test because activities are disabled". This keeps the common case light:
+recording activities makes the companion buffer attachment payloads, which
+forfeits most of idb's memory advantage.
+
+Set `RULES_IDB_REPORT_ACTIVITIES=1` (e.g. via the test's `env` or
+`--test_env`) to enable activities so attachment-using suites run instead of
+crashing. The attachments appear in idb's JSON activity log; their payloads
+are not extracted as files.
+
+`RULES_IDB_COLLECT_RESULT_BUNDLE=1` additionally requests an `.xcresult`
+(with attachment payloads) into the test's undeclared outputs. Note: the
+`.xcresult` is fundamentally an `xcodebuild`-session artifact, and idb's
+native test path does not emit one with the vendored companion — the runner
+warns when the requested bundle does not materialize. Use this only if a
+companion build that emits result bundles in the native path is in use.
 
 ## How the simulator pool works
 
