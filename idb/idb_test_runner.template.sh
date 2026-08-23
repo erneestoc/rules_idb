@@ -248,12 +248,20 @@ cleanup() {
   # still reporting Booted, but hanging every future session. Shut it down
   # so the next claimant of this slot cold-boots clean; normal exits leave
   # it warm. Bounded well inside Bazel's SIGTERM->SIGKILL grace.
+  local keep_session_marker=false
   if [[ "$cleanup_exit_code" -eq 143 || "$cleanup_exit_code" -eq 130 ]] \
       && [[ -n "${acquired_slot:-}" && -n "${simulator_id:-}" ]]; then
     echo "note: terminated mid-run; shutting simulator $simulator_id down" >&2
-    run_bounded 10 xcrun simctl shutdown "$simulator_id" >/dev/null 2>&1 || true
+    # Confirm the shutdown before clearing the wedge evidence, bounded tight
+    # to stay within Bazel's SIGTERM->SIGKILL grace. If it cannot be
+    # confirmed the device may still carry a dead session, so keep the marker
+    # -- the next claimant of this slot recycles it. (If this cleanup is
+    # itself SIGKILLed mid-verify the marker simply survives, same outcome.)
+    if ! shutdown_and_verify "$simulator_id" 10 5; then
+      keep_session_marker=true
+    fi
   fi
-  if [[ -n "${session_marker:-}" ]]; then
+  if [[ -n "${session_marker:-}" && "$keep_session_marker" != true ]]; then
     rm -f "$session_marker"
   fi
   if [[ -z "${NO_CLEAN:-}" ]]; then
