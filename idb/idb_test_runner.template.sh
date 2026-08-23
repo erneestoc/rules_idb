@@ -105,6 +105,46 @@ wait_for_springboard() {
   return 1
 }
 
+# Shut a simulator down and confirm it actually reached the Shutdown state.
+# `simctl shutdown` can fail or time out against a wedged CoreSimulatorService
+# while leaving the device Booted, and it returns non-zero for an
+# already-Shutdown device too -- so the observed STATE is authoritative, not
+# the exit code. A caller that trusted a failed shutdown would hand a
+# still-Booted, wedged device to `bootstatus -b` (which returns immediately
+# for an already-booted device) and run the test against a dead session.
+# Returns 0 once the device reports Shutdown (or is gone), 1 if it is still
+# Booted after the bounded wait or its state could not be read. Mirrors
+# rules_apple #3026's _shutdown_and_wait. Args: udid [shutdown_secs] [polls]
+shutdown_and_verify() {
+  local udid="$1" shutdown_secs="${2:-60}" polls="${3:-15}"
+  run_bounded "$shutdown_secs" xcrun simctl shutdown "$udid" >/dev/null 2>&1 || true
+  local _p listing state
+  for (( _p = 0; _p < polls; _p++ )); do
+    if listing=$(run_bounded 10 xcrun simctl list devices -j "$udid" 2>/dev/null); then
+      state=$(printf '%s' "$listing" | "${python_bin:-python3}" -c '
+import json, sys
+try:
+    devices = json.load(sys.stdin).get("devices", {})
+except ValueError:
+    raise SystemExit
+udid = sys.argv[1]
+for device_list in devices.values():
+    for device in device_list:
+        if device.get("udid") == udid:
+            print(device.get("state", ""))
+            raise SystemExit
+' "$udid" 2>/dev/null)
+      # An absent device (deleted) or an explicit Shutdown both mean "not
+      # wedged"; only a still-Booted device keeps us waiting.
+      if [[ -z "$state" || "$state" == "Shutdown" ]]; then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 # Resolve a runfiles short_path against the test's runfiles tree.
 runfile() {
   local p="$1"
@@ -547,13 +587,24 @@ PYEOF
   # when an earlier boot or session died midway. Routing through the boot
   # block below reuses its gate, readiness wait, and settle.
   if [[ "$needs_create" != true && "$simulator_state" == "Booted" ]]; then
+    recycle_reason=""
     if [[ "$stale_session" == true ]]; then
-      run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
-      simulator_state="Shutdown"
+      recycle_reason="a previous test died mid-session"
     elif ! wait_for_springboard "$simulator_id"; then
-      echo "note: reused simulator $simulator_id is booted but not responding; re-booting it" >&2
-      run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
-      simulator_state="Shutdown"
+      recycle_reason="it is booted but not responding"
+    fi
+    if [[ -n "$recycle_reason" ]]; then
+      echo "note: recycling simulator $simulator_id ($recycle_reason)" >&2
+      # Confirm the shutdown took effect before treating the device as
+      # recyclable: a failed/timed-out shutdown would otherwise fall through
+      # to 'bootstatus -b' on a still-Booted, wedged device and run the test
+      # against a dead session.
+      if shutdown_and_verify "$simulator_id"; then
+        simulator_state="Shutdown"
+      else
+        echo "error: could not shut simulator $simulator_id down for recycling; CoreSimulatorService may need attention" >&2
+        exit 1
+      fi
     fi
   fi
 
@@ -630,7 +681,10 @@ PYEOF
     # never gets there (bootstatus tolerates failed boots; see helper).
     if ! wait_for_springboard "$simulator_id"; then
       echo "note: simulator not ready after boot; re-booting it once" >&2
-      run_bounded 60 xcrun simctl shutdown "$simulator_id" >&2 || true
+      # Best-effort fallback: verify the shutdown so the re-boot starts from
+      # a real Shutdown state rather than a no-op on a still-Booted device.
+      shutdown_and_verify "$simulator_id" \
+        || echo "note: simulator $simulator_id did not confirm shutdown before re-boot" >&2
       run_bounded "$boot_wait_secs" xcrun simctl bootstatus "$simulator_id" -b >&2 || true
       wait_for_springboard "$simulator_id" \
         || echo "note: simulator still not ready; proceeding, idb will surface errors" >&2
