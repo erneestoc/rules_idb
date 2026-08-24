@@ -13,6 +13,62 @@ index 82599f4..3332edb 100644
        Self.keyUDID: udid as Any? ?? NSNull(),
      ]
      for (key, value) in extendedInformation {
+diff --git a/Companion/SwiftServer/MethodHandlers/AddMediaMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/AddMediaMethodHandler.swift
+index ae036d2..07940ba 100644
+--- a/Companion/SwiftServer/MethodHandlers/AddMediaMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/AddMediaMethodHandler.swift
+@@ -15,9 +15,13 @@ struct AddMediaMethodHandler {
+   let commandExecutor: FBIDBCommandExecutor
+ 
+   func handle(requestStream: GRPCAsyncRequestStream<Idb_AddMediaRequest>, context: GRPCAsyncServerCallContext) async throws -> Idb_AddMediaResponse {
++    // grpc-swift traps if a second AsyncIterator is created; read every
++    // request frame through one owned iterator.
++    let stream = SingleIteratorRequestStream(requestStream)
++
+     let extractedFileURLs =
+       try await MultisourceFileReader
+-      .filePathURLs(from: requestStream, temporaryDirectory: commandExecutor.temporaryDirectory, extractFromSubdir: true)
++      .filePathURLs(from: stream, temporaryDirectory: commandExecutor.temporaryDirectory, extractFromSubdir: true)
+ 
+     try await commandExecutor.add_media(extractedFileURLs)
+     return .init()
+diff --git a/Companion/SwiftServer/MethodHandlers/DapMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/DapMethodHandler.swift
+index ff0a1a7..a007807 100644
+--- a/Companion/SwiftServer/MethodHandlers/DapMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/DapMethodHandler.swift
+@@ -18,7 +18,11 @@ struct DapMethodHandler: @unchecked Sendable {
+   let targetLogger: FBControlCoreLogger
+ 
+   func handle(requestStream: GRPCAsyncRequestStream<Idb_DapRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_DapResponse>, context: GRPCAsyncServerCallContext) async throws {
+-    guard case let .start(start) = try await requestStream.requiredNext.control
++    // grpc-swift traps if a second AsyncIterator is created; read every
++    // request frame through one owned iterator.
++    let stream = SingleIteratorRequestStream(requestStream)
++
++    guard case let .start(start) = try await stream.requiredNext.control
+     else { throw GRPCStatus(code: .failedPrecondition, message: "Dap command expected a Start messaged in the beginning of the Stream") }
+ 
+     let writer = FBProcessInput<FBDataConsumer>.fromConsumer().retyped(FBProcessInput<AnyObject>.self)
+@@ -26,7 +30,7 @@ struct DapMethodHandler: @unchecked Sendable {
+ 
+     let tenHours: UInt64 = 36000 * 1000000000
+     try await Task.timeout(nanoseconds: tenHours) {
+-      try await consumeElements(from: requestStream, to: writer, dapProcess: dapProcess)
++      try await consumeElements(from: stream, to: writer, dapProcess: dapProcess)
+     }
+ 
+     let stoppedResponse = Idb_DapResponse.with {
+@@ -59,8 +63,8 @@ struct DapMethodHandler: @unchecked Sendable {
+     return process
+   }
+ 
+-  private func consumeElements(from requestStream: GRPCAsyncRequestStream<Idb_DapRequest>, to writer: FBProcessInput<AnyObject>, dapProcess: FBSubprocess<AnyObject, FBDataConsumer, NSString>) async throws {
+-    for try await request in requestStream {
++  private func consumeElements(from stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_DapRequest>>, to writer: FBProcessInput<AnyObject>, dapProcess: FBSubprocess<AnyObject, FBDataConsumer, NSString>) async throws {
++    while let request = try await stream.next() {
+       switch request.control {
+       case .start:
+         throw GRPCStatus(code: .failedPrecondition, message: "DAP server already started")
 diff --git a/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
 index ed4a6a8..c67f1e4 100644
 --- a/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
@@ -29,41 +85,10 @@ index ed4a6a8..c67f1e4 100644
          if let screenInfo = target.screenInfo {
            $0.screenDimensions = .with {
 diff --git a/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
-index 06d44bb..725f128 100644
+index 06d44bb..8b8c409 100644
 --- a/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
 +++ b/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
-@@ -11,6 +11,30 @@ import Foundation
- import GRPC
- import IDBGRPCSwift
- 
-+/// Owns the single AsyncIterator of a gRPC request stream. grpc-swift's
-+/// GRPCAsyncRequestStream traps if more than one iterator is ever created,
-+/// so every read for one RPC must go through the same instance.
-+private final class SingleIteratorRequestStream<S: AsyncSequence>: @unchecked Sendable {
-+  private var iterator: S.AsyncIterator
-+
-+  init(_ sequence: S) {
-+    self.iterator = sequence.makeAsyncIterator()
-+  }
-+
-+  func next() async throws -> S.Element? {
-+    try await iterator.next()
-+  }
-+
-+  var requiredNext: S.Element {
-+    get async throws {
-+      guard let next = try await next() else {
-+        throw StreamReadError<S.Element>.nextElementNotProduced
-+      }
-+      return next
-+    }
-+  }
-+}
-+
- struct InstallMethodHandler: @unchecked Sendable {
- 
-   let commandExecutor: FBIDBCommandExecutor
-@@ -18,7 +42,8 @@ struct InstallMethodHandler: @unchecked Sendable {
+@@ -18,7 +18,8 @@ struct InstallMethodHandler: @unchecked Sendable {
  
    func handle(requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_InstallResponse>, context: GRPCAsyncServerCallContext) async throws {
  
@@ -73,7 +98,7 @@ index 06d44bb..725f128 100644
  
      let response = Idb_InstallResponse.with {
        $0.name = artifact.name
-@@ -27,7 +52,7 @@ struct InstallMethodHandler: @unchecked Sendable {
+@@ -27,7 +28,7 @@ struct InstallMethodHandler: @unchecked Sendable {
      try await responseStream.send(response)
    }
  
@@ -82,7 +107,7 @@ index 06d44bb..725f128 100644
  
      func extractPayloadFromRequest() throws -> Idb_Payload {
        guard let payload = request.extractPayload() else {
-@@ -36,34 +61,34 @@ struct InstallMethodHandler: @unchecked Sendable {
+@@ -36,34 +37,34 @@ struct InstallMethodHandler: @unchecked Sendable {
        return payload
      }
  
@@ -123,7 +148,7 @@ index 06d44bb..725f128 100644
      }
  
      var linkToBundle: FBDsymInstallLinkToBundle?
-@@ -71,12 +96,12 @@ struct InstallMethodHandler: @unchecked Sendable {
+@@ -71,12 +72,12 @@ struct InstallMethodHandler: @unchecked Sendable {
      // (2022-03-02) REMOVE! Keeping only for retrocompatibility
      if case let .bundleID(id) = request.value {
        linkToBundle = .init(bundleID: id, bundleType: .app)
@@ -138,7 +163,7 @@ index 06d44bb..725f128 100644
      }
  
      var payload = try extractPayloadFromRequest()
-@@ -84,14 +109,14 @@ struct InstallMethodHandler: @unchecked Sendable {
+@@ -84,14 +85,14 @@ struct InstallMethodHandler: @unchecked Sendable {
      var compression = FBCompressionFormat.GZIP
      if case let .compression(format) = payload.source {
        compression = readCompressionFormat(from: format)
@@ -155,7 +180,7 @@ index 06d44bb..725f128 100644
        name: name,
        makeDebuggable: makeDebuggable,
        linkToBundle: linkToBundle,
-@@ -103,7 +128,7 @@ struct InstallMethodHandler: @unchecked Sendable {
+@@ -103,7 +104,7 @@ struct InstallMethodHandler: @unchecked Sendable {
    private func installData(
      from source: Idb_Payload.OneOf_Source?,
      to destination: Idb_InstallRequest.Destination,
@@ -164,7 +189,7 @@ index 06d44bb..725f128 100644
      name: String,
      makeDebuggable: Bool,
      linkToBundle: FBDsymInstallLinkToBundle?,
-@@ -134,14 +159,14 @@ struct InstallMethodHandler: @unchecked Sendable {
+@@ -134,14 +135,14 @@ struct InstallMethodHandler: @unchecked Sendable {
        if destination == .app && isZipArchive(data) {
          return try await installZipArchive(
            initial: data,
@@ -181,7 +206,7 @@ index 06d44bb..725f128 100644
        let artifact = try await installSource(
          dataStream: unsafeBitCast(input, to: FBProcessInput<AnyObject>.self),
          skipSigningBundles: skipSigningBundles)
-@@ -184,7 +209,7 @@ struct InstallMethodHandler: @unchecked Sendable {
+@@ -184,7 +185,7 @@ struct InstallMethodHandler: @unchecked Sendable {
  
    private func installZipArchive(
      initial: Data,
@@ -190,7 +215,7 @@ index 06d44bb..725f128 100644
      makeDebuggable: Bool,
      overrideModificationTime: Bool
    ) async throws -> FBInstalledArtifact {
-@@ -199,7 +224,7 @@ struct InstallMethodHandler: @unchecked Sendable {
+@@ -199,7 +200,7 @@ struct InstallMethodHandler: @unchecked Sendable {
      let file = try FileHandle(forWritingTo: archiveURL)
      do {
        try file.write(contentsOf: initial)
@@ -199,7 +224,7 @@ index 06d44bb..725f128 100644
          guard let data = request.extractDataFrame() else {
            continue
          }
-@@ -219,14 +244,14 @@ struct InstallMethodHandler: @unchecked Sendable {
+@@ -219,14 +220,14 @@ struct InstallMethodHandler: @unchecked Sendable {
  
    private func writePayload(
      initial: Data,
@@ -216,11 +241,57 @@ index 06d44bb..725f128 100644
        guard let data = request.extractDataFrame() else {
          continue
        }
+diff --git a/Companion/SwiftServer/MethodHandlers/InstrumentsRunMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/InstrumentsRunMethodHandler.swift
+index b2d1827..1589eca 100644
+--- a/Companion/SwiftServer/MethodHandlers/InstrumentsRunMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/InstrumentsRunMethodHandler.swift
+@@ -22,12 +22,17 @@ struct InstrumentsRunMethodHandler {
+   func handle(requestStream: GRPCAsyncRequestStream<Idb_InstrumentsRunRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_InstrumentsRunResponse>, context: GRPCAsyncServerCallContext) async throws {
+     @Atomic var finishedWriting = false
+ 
+-    guard case let .start(start) = try await requestStream.requiredNext.control
++    // Read every request frame through one owned iterator: grpc-swift's
++    // request stream traps if a second AsyncIterator is created, and this
++    // handler reads more than one frame.
++    let stream = SingleIteratorRequestStream(requestStream)
++
++    guard case let .start(start) = try await stream.requiredNext.control
+     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected start control") }
+ 
+     let operation = try await startInstrumentsOperation(request: start, responseStream: responseStream, finishedWriting: _finishedWriting)
+ 
+-    guard case let .stop(stop) = try await requestStream.requiredNext.control
++    guard case let .stop(stop) = try await stream.requiredNext.control
+     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected end control") }
+ 
+     try await stopInstruments(operation: operation, request: stop, responseStream: responseStream, finishedWriting: _finishedWriting)
 diff --git a/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift
-index 7cfd41c..db1a2a5 100644
+index 7cfd41c..d755b2b 100644
 --- a/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift
 +++ b/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift
-@@ -77,14 +77,20 @@ struct LaunchMethodHandler: @unchecked Sendable {
+@@ -19,7 +19,12 @@ struct LaunchMethodHandler: @unchecked Sendable {
+   func handle(requestStream: GRPCAsyncRequestStream<Idb_LaunchRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_LaunchResponse>, context: GRPCAsyncServerCallContext) async throws {
+     var consumers: [any FBDataConsumerLifecycle] = []
+ 
+-    var request = try await requestStream.requiredNext
++    // Read every request frame through one owned iterator: grpc-swift's
++    // request stream traps if a second AsyncIterator is created, and this
++    // handler reads more than one frame.
++    let stream = SingleIteratorRequestStream(requestStream)
++
++    var request = try await stream.requiredNext
+     guard case let .start(start) = request.control else {
+       throw GRPCStatus(code: .failedPrecondition, message: "Application not started yet")
+     }
+@@ -70,21 +75,27 @@ struct LaunchMethodHandler: @unchecked Sendable {
+ 
+     guard start.waitFor else { return }
+ 
+-    request = try await requestStream.requiredNext
++    request = try await stream.requiredNext
+     guard case .stop = request.control else {
+       throw GRPCStatus(code: .failedPrecondition, message: "Application has already started")
+     }
  
      try await launchedApp.terminate()
  
@@ -264,6 +335,103 @@ index fb88d3b..eb6a416 100644
      try await Task.select(observeWritingDone, observeOperationCompletion).value
      writingDone.resolve(())
  
+diff --git a/Companion/SwiftServer/MethodHandlers/PushMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/PushMethodHandler.swift
+index 34d50dc..925ec2b 100644
+--- a/Companion/SwiftServer/MethodHandlers/PushMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/PushMethodHandler.swift
+@@ -16,14 +16,18 @@ struct PushMethodHandler {
+   let commandExecutor: FBIDBCommandExecutor
+ 
+   func handle(requestStream: GRPCAsyncRequestStream<Idb_PushRequest>, context: GRPCAsyncServerCallContext) async throws -> Idb_PushResponse {
+-    let request = try await requestStream.requiredNext
++    // grpc-swift traps if a second AsyncIterator is created; read every
++    // request frame through one owned iterator.
++    let stream = SingleIteratorRequestStream(requestStream)
++
++    let request = try await stream.requiredNext
+ 
+     guard case let .inner(inner) = request.value
+     else { throw GRPCStatus(code: .invalidArgument, message: "Expected inner as first request in stream") }
+ 
+     let extractedFileURLs =
+       try await MultisourceFileReader
+-      .filePathURLs(from: requestStream, temporaryDirectory: commandExecutor.temporaryDirectory, extractFromSubdir: false)
++      .filePathURLs(from: stream, temporaryDirectory: commandExecutor.temporaryDirectory, extractFromSubdir: false)
+ 
+     let fileContainer = FileContainerValueTransformer.rawFileContainer(from: inner.container)
+     try await commandExecutor.push_files(extractedFileURLs, to_path: inner.dstPath, containerType: fileContainer)
+diff --git a/Companion/SwiftServer/MethodHandlers/RecordMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/RecordMethodHandler.swift
+index 9333e9c..5410dc8 100644
+--- a/Companion/SwiftServer/MethodHandlers/RecordMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/RecordMethodHandler.swift
+@@ -17,7 +17,14 @@ struct RecordMethodHandler {
+ 
+   func handle(requestStream: GRPCAsyncRequestStream<Idb_RecordRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_RecordResponse>, context: GRPCAsyncServerCallContext) async throws {
+ 
+-    let request = try await requestStream.requiredNext
++    // grpc-swift's request stream traps if a second AsyncIterator is ever
++    // created; this handler reads two frames (start, then stop), so both
++    // reads must go through one owned iterator. `requestStream.requiredNext`
++    // makes a fresh iterator per call and crashes the companion on the stop
++    // frame, so route every read through a single SingleIteratorRequestStream.
++    let stream = SingleIteratorRequestStream(requestStream)
++
++    let request = try await stream.requiredNext
+     guard case let .start(start) = request.control
+     else { throw GRPCStatus(code: .failedPrecondition, message: "Expect start as initial request frame") }
+ 
+@@ -31,7 +38,7 @@ struct RecordMethodHandler {
+     }
+     let recording = try await asyncTarget.startRecording(toFile: filePath)
+ 
+-    _ = try await requestStream.requiredNext
++    _ = try await stream.requiredNext
+     let outputURL = try await recording.stop()
+ 
+     if start.filePath.isEmpty {
+diff --git a/Companion/SwiftServer/MethodHandlers/ReplMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/ReplMethodHandler.swift
+index ee2c1fe..b3f92d3 100644
+--- a/Companion/SwiftServer/MethodHandlers/ReplMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/ReplMethodHandler.swift
+@@ -22,7 +22,11 @@ struct ReplMethodHandler {
+   let recordingCoordinator: ReplRecordingCoordinator
+ 
+   func handle(requestStream: GRPCAsyncRequestStream<Idb_ReplRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_ReplResponse>, context: GRPCAsyncServerCallContext) async throws {
+-    guard case let .start(start) = try await requestStream.requiredNext.control
++    // grpc-swift traps if a second AsyncIterator is created; read every
++    // request frame through one owned iterator.
++    let stream = SingleIteratorRequestStream(requestStream)
++
++    guard case let .start(start) = try await stream.requiredNext.control
+     else { throw GRPCStatus(code: .failedPrecondition, message: "repl expected a Start message at the beginning of the stream") }
+ 
+     targetLogger.debug().log("REPL session context: \(start.context)")
+@@ -56,14 +60,14 @@ struct ReplMethodHandler {
+     // than pulled back over gRPC.
+     let sharedFilesystem = !start.probeFilePath.isEmpty && FileManager.default.fileExists(atPath: start.probeFilePath)
+ 
+-    try await serve(session: session, sharedFilesystem: sharedFilesystem, context: start.context, appBundleID: appBundleID, requestStream: requestStream, responseStream: responseStream)
++    try await serve(session: session, sharedFilesystem: sharedFilesystem, context: start.context, appBundleID: appBundleID, requestStream: stream, responseStream: responseStream)
+   }
+ 
+   /// Bridges the gRPC repl stream to a launched session's control socket:
+   /// connects to the socket, reports `ready`, forwards each `Execute` (a dylib
+   /// plus a symbol) to the socket and streams back the result, and on stop/EOF
+   /// closes the socket (which ends the served process) and reports `stopped`.
+-  private func serve(session: ReplSession, sharedFilesystem: Bool, context: Idb_ReplRequest.Start.Context, appBundleID: String?, requestStream: GRPCAsyncRequestStream<Idb_ReplRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_ReplResponse>) async throws {
++  private func serve(session: ReplSession, sharedFilesystem: Bool, context: Idb_ReplRequest.Start.Context, appBundleID: String?, requestStream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_ReplRequest>>, responseStream: GRPCAsyncResponseStreamWriter<Idb_ReplResponse>) async throws {
+     // Per-session scratch directory for the dylibs received over the wire. It
+     // lives on the host filesystem, which the simulator process can read.
+     let scratchDirectory = (NSTemporaryDirectory() as NSString).appendingPathComponent("idb_repl_\(UUID().uuidString)")
+@@ -126,7 +130,7 @@ struct ReplMethodHandler {
+     let dispatcher = HostCommandDispatcher(commandExecutor: commandExecutor, state: hostState, recordingCoordinator: recordingCoordinator, appBundleID: appBundleID)
+ 
+     var runIndex = 0
+-    bridge: for try await request in requestStream {
++    bridge: while let request = try await requestStream.next() {
+       switch request.control {
+       case .start:
+         throw GRPCStatus(code: .failedPrecondition, message: "repl session already started")
 diff --git a/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift b/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift
 index 066369c..b6fcddb 100644
 --- a/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift
@@ -281,6 +449,190 @@ index 066369c..b6fcddb 100644
      semaphore.wait()
      return box.value
    }
+diff --git a/Companion/SwiftServer/MethodHandlers/TailMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/TailMethodHandler.swift
+index d26d4bf..a031f24 100644
+--- a/Companion/SwiftServer/MethodHandlers/TailMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/TailMethodHandler.swift
+@@ -19,7 +19,12 @@ struct TailMethodHandler {
+   func handle(requestStream: GRPCAsyncRequestStream<Idb_TailRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_TailResponse>, context: GRPCAsyncServerCallContext) async throws {
+     @Atomic var finished = false
+ 
+-    guard case let .start(start) = try await requestStream.requiredNext.control
++    // Read every request frame through one owned iterator: grpc-swift's
++    // request stream traps if a second AsyncIterator is created, and this
++    // handler reads more than one frame.
++    let stream = SingleIteratorRequestStream(requestStream)
++
++    guard case let .start(start) = try await stream.requiredNext.control
+     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected start control") }
+ 
+     let responseWriter = FIFOStreamWriter(stream: responseStream)
+@@ -38,7 +43,7 @@ struct TailMethodHandler {
+     let fileContainer = FileContainerValueTransformer.rawFileContainer(from: start.container)
+     let tail = try await commandExecutor.tail(start.path, to_consumer: consumer, in_container: fileContainer)
+ 
+-    guard case .stop = try await requestStream.requiredNext.control
++    guard case .stop = try await stream.requiredNext.control
+     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected end control") }
+ 
+     try await tail.cancel()
+diff --git a/Companion/SwiftServer/MethodHandlers/VideoStreamMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/VideoStreamMethodHandler.swift
+index fccbeeb..426c58e 100644
+--- a/Companion/SwiftServer/MethodHandlers/VideoStreamMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/VideoStreamMethodHandler.swift
+@@ -34,7 +34,11 @@ struct VideoStreamMethodHandler {
+   func handle(requestStream: GRPCAsyncRequestStream<Idb_VideoStreamRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_VideoStreamResponse>, context: GRPCAsyncServerCallContext) async throws {
+     @Atomic var finished = false
+ 
+-    guard case let .start(start) = try await requestStream.requiredNext.control
++    // grpc-swift traps if a second AsyncIterator is created; read every
++    // request frame through one owned iterator.
++    let stream = SingleIteratorRequestStream(requestStream)
++
++    guard case let .start(start) = try await stream.requiredNext.control
+     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected start control") }
+ 
+     let videoStream = try await startVideoStream(
+@@ -43,7 +47,7 @@ struct VideoStreamMethodHandler {
+       finished: _finished)
+ 
+     let observeClientCancelStreaming = Task<Void, Error> {
+-      for try await request in requestStream {
++      while let request = try await stream.next() {
+         switch request.control {
+         case .start:
+           throw GRPCStatus(code: .failedPrecondition, message: "Video streaming already started")
+diff --git a/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift
+index d99881f..bd4e046 100644
+--- a/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift
+@@ -23,11 +23,16 @@ struct XctraceRecordMethodHandler {
+     @Atomic var finishedWriting = false
+     defer { _finishedWriting.set(true) }
+ 
+-    guard case let .start(start) = try await requestStream.requiredNext.control
++    // Read every request frame through one owned iterator: grpc-swift's
++    // request stream traps if a second AsyncIterator is created, and this
++    // handler reads more than one frame.
++    let stream = SingleIteratorRequestStream(requestStream)
++
++    guard case let .start(start) = try await stream.requiredNext.control
+     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected start control") }
+     let operation = try await startXCTraceOperation(request: start, responseStream: responseStream, finishedWriting: _finishedWriting)
+ 
+-    guard case let .stop(stop) = try await requestStream.requiredNext.control
++    guard case let .stop(stop) = try await stream.requiredNext.control
+     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected end control") }
+ 
+     try await stopXCTrace(operation: operation, request: stop, responseStream: responseStream, finishedWriting: _finishedWriting)
+diff --git a/Companion/Utility/AsyncSequence+Extension.swift b/Companion/Utility/AsyncSequence+Extension.swift
+index 5051d98..40422a0 100644
+--- a/Companion/Utility/AsyncSequence+Extension.swift
++++ b/Companion/Utility/AsyncSequence+Extension.swift
+@@ -23,6 +23,12 @@ extension AsyncSequence {
+ 
+   /// We have quite a lot of grpc request streams where we read request N constant number of times and do not need foreach loop. But pure next produces optinal by design.
+   /// This small tweak just saves us from lots of boilerplate of unwrapping the optionals everywhere
++  ///
++  /// - Warning: this reads via `first(where:)`, which creates a *new*
++  ///   `AsyncIterator` on every call. `GRPCAsyncRequestStream` fatal-errors if a
++  ///   second iterator is ever created, so this must be called at most once per
++  ///   request stream. Handlers that read more than one frame must wrap the
++  ///   stream in a `SingleIteratorRequestStream` and read through that instead.
+   var requiredNext: Element {
+     get async throws {
+       guard let next = try await first(where: { _ in true }) else {
+diff --git a/Companion/Utility/MultisourceFileReader.swift b/Companion/Utility/MultisourceFileReader.swift
+index bef25d5..2dab4bc 100644
+--- a/Companion/Utility/MultisourceFileReader.swift
++++ b/Companion/Utility/MultisourceFileReader.swift
+@@ -13,9 +13,9 @@ import IDBGRPCSwift
+ 
+ enum MultisourceFileReader {
+ 
+-  static func filePathURLs<Request: PayloadExtractable>(from requestStream: GRPCAsyncRequestStream<Request>, temporaryDirectory: FBTemporaryDirectory, extractFromSubdir: Bool) async throws -> [URL] {
++  static func filePathURLs<Request: PayloadExtractable>(from requestStream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Request>>, temporaryDirectory: FBTemporaryDirectory, extractFromSubdir: Bool) async throws -> [URL] {
+     func readNextPayload() async throws -> Idb_Payload {
+-      guard let p = try await requestStream.requiredNext.extractPayload()
++      guard let p = try await requestStream.requiredNext.extractPayload()  // wrapper's single-iterator read
+       else { throw GRPCStatus(code: .failedPrecondition, message: "Incorrect request. Expected payload") }
+       return p
+     }
+@@ -59,10 +59,10 @@ enum MultisourceFileReader {
+     }
+   }
+ 
+-  private static func filepathsFromStream<Request: PayloadExtractable>(initial: URL, requestStream: GRPCAsyncRequestStream<Request>) async throws -> [URL] {
++  private static func filepathsFromStream<Request: PayloadExtractable>(initial: URL, requestStream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Request>>) async throws -> [URL] {
+     var filePaths = [initial]
+ 
+-    for try await request in requestStream {
++    while let request = try await requestStream.next() {
+       guard let payload = request.extractPayload()
+       else { throw GRPCStatus(code: .invalidArgument, message: "Unrecogized buffer frame. Expect payload, got \(request)") }
+ 
+@@ -86,7 +86,7 @@ enum MultisourceFileReader {
+   }
+ 
+   // TODO: Do we really need multithreading here? Isnt we just fill the stream sequentially while read is blocked and only then read starts?
+-  private static func pipeToInput<Request: PayloadExtractable>(initialData: Data, requestStream: GRPCAsyncRequestStream<Request>) -> (Task<Void, Error>, FBProcessInput<OutputStream>) {
++  private static func pipeToInput<Request: PayloadExtractable>(initialData: Data, requestStream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Request>>) -> (Task<Void, Error>, FBProcessInput<OutputStream>) {
+     let input = FBProcessInput<OutputStream>.fromStream()
+     let stream = input.contents
+ 
+@@ -97,7 +97,7 @@ enum MultisourceFileReader {
+       var buffer = [UInt8](initialData)
+       stream.write(&buffer, maxLength: buffer.count)
+ 
+-      for try await request in requestStream {
++      while let request = try await requestStream.next() {
+         guard let payload = request.extractPayload()
+         else { throw GRPCStatus(code: .invalidArgument, message: "Unrecogized buffer frame. Expect payload, got \(request)") }
+ 
+diff --git a/Companion/Utility/SingleIteratorRequestStream.swift b/Companion/Utility/SingleIteratorRequestStream.swift
+new file mode 100644
+index 0000000..84e7ab9
+--- /dev/null
++++ b/Companion/Utility/SingleIteratorRequestStream.swift
+@@ -0,0 +1,38 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * This source code is licensed under the MIT license found in the
++ * LICENSE file in the root directory of this source tree.
++ */
++
++/// Owns the single `AsyncIterator` of a gRPC request stream.
++///
++/// grpc-swift's `GRPCAsyncRequestStream` is backed by
++/// `NIOThrowingAsyncSequenceProducer`, which fatal-errors if more than one
++/// iterator is ever created from it. `AsyncSequence.requiredNext` reads via
++/// `first(where:)`, and every `first(where:)` makes a *new* iterator — so any
++/// handler that reads more than one request frame straight off the stream
++/// (`requestStream.requiredNext` twice) crashes the whole companion on the
++/// second read. Wrapping the stream once and reading every frame through this
++/// type keeps all reads on one iterator.
++final class SingleIteratorRequestStream<S: AsyncSequence>: @unchecked Sendable {
++  private var iterator: S.AsyncIterator
++
++  init(_ sequence: S) {
++    self.iterator = sequence.makeAsyncIterator()
++  }
++
++  func next() async throws -> S.Element? {
++    try await iterator.next()
++  }
++
++  /// The next element, treating end-of-stream as a precondition failure.
++  var requiredNext: S.Element {
++    get async throws {
++      guard let next = try await next() else {
++        throw StreamReadError<S.Element>.nextElementNotProduced
++      }
++      return next
++    }
++  }
++}
 diff --git a/Companion/main.swift b/Companion/main.swift
 index 0e47def..abdef27 100644
 --- a/Companion/main.swift

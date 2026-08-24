@@ -39,12 +39,24 @@ Behavioral fixes (carried since `70d75b3`):
   mismatch` deserialization failure when compiling `idb_companion` in
   Release. The patch marks the prototypes `NS_SWIFT_UNAVAILABLE` and exposes
   renamed `public` Swift functions instead.
-* **`InstallMethodHandler.swift`**: the handler created a new AsyncIterator
-  per read on the gRPC request stream, which grpc-swift's
-  `NIOThrowingAsyncSequenceProducer` forbids (fatal error on every install).
-  As of `3f1bb6e` upstream added a second, parallel zip-archive install path
-  (`installZipArchive`) with the same bug; the patch's single-iterator
-  wrapper now threads through that path too.
+* **Single-`AsyncIterator` crash across multi-frame handlers** (new file
+  `Companion/Utility/SingleIteratorRequestStream.swift`, plus edits to
+  `Install`/`Record`/`Launch`/`Tail`/`XctraceRecord`/`InstrumentsRun`/`Dap`/
+  `Repl`/`VideoStream` method handlers and `MultisourceFileReader`):
+  grpc-swift's `GRPCAsyncRequestStream` (backed by
+  `NIOThrowingAsyncSequenceProducer`) fatal-errors if more than one
+  `AsyncIterator` is ever created from it. The `AsyncSequence.requiredNext`
+  helper reads via `first(where:)` — a *new* iterator each call — and a
+  `for try await … in requestStream` loop makes one too, so any handler that
+  combines two such reads on one stream aborts the whole companion on the
+  second read (`idb install`, `idb video`/recording, `launch --wait-for`,
+  `tail`, `xctrace`, `instruments`, `dap`, `repl`, `video-stream`, and
+  `push`/`add-media` via `MultisourceFileReader`). The patch adds a shared
+  `SingleIteratorRequestStream` that owns one iterator per RPC and routes
+  every multi-frame read (including the `for try await` loops, rewritten as
+  `while let request = try await stream.next()`) through it. This is what
+  unblocks `RULES_IDB_RECORD_VIDEO`. Upstreamed as facebook/idb#955 — drop
+  these hunks once the vendored pin includes it.
 * **`FBTestRunnerConfiguration.swift`**: adds the platform's
   `Developer/usr/lib` to the test host's `DYLD_FALLBACK_LIBRARY_PATH` so
   Swift test bundles can load `libXCTestSwiftSupport.dylib`; also plumbs a
