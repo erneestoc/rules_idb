@@ -75,7 +75,7 @@ comp_env=()
   comp_env=(--test_env=RULES_IDB_COMPANION_PATH="$RULES_IDB_COMPANION_PATH")
 rm -f "$(rec_mp4 UITests)"
 bazel test //examples:UITests --nocache_test_results --test_output=summary \
-  "${comp_env[@]}" --test_env=RULES_IDB_RECORD_VIDEO=always >/dev/null 2>&1
+  ${comp_env[@]+"${comp_env[@]}"} --test_env=RULES_IDB_RECORD_VIDEO=always >/dev/null 2>&1
 if [[ -s "$(rec_mp4 UITests)" ]]; then
   check "record=always keeps a video on a passing run" "[[ -s '$(rec_mp4 UITests)' ]]"
   check "recorded file is a real mp4 (ftyp/moov)" \
@@ -83,13 +83,13 @@ if [[ -s "$(rec_mp4 UITests)" ]]; then
 
   rm -f "$(rec_mp4 UITests)"
   bazel test //examples:UITests --nocache_test_results --test_output=summary \
-    "${comp_env[@]}" --test_env=RULES_IDB_RECORD_VIDEO=on-failure >/dev/null 2>&1
+    ${comp_env[@]+"${comp_env[@]}"} --test_env=RULES_IDB_RECORD_VIDEO=on-failure >/dev/null 2>&1
   check "record=on-failure discards video when the test passes" \
     "[[ ! -s '$(rec_mp4 UITests)' ]]"
 
   rm -f "$(rec_mp4 FailingUITests)"
   bazel test //examples:FailingUITests --nocache_test_results --test_output=summary \
-    "${comp_env[@]}" --test_env=RULES_IDB_RECORD_VIDEO=on-failure >/dev/null 2>&1
+    ${comp_env[@]+"${comp_env[@]}"} --test_env=RULES_IDB_RECORD_VIDEO=on-failure >/dev/null 2>&1
   check "record=on-failure keeps a video when the test fails" \
     "[[ -s '$(rec_mp4 FailingUITests)' ]]"
 else
