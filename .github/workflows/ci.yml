@@ -8,7 +8,7 @@ on:
 env:
   # facebook/idb revision the companion is built from; must match
   # docs/BUILDING_IDB.md and the build-idb-dist workflow default.
-  IDB_COMMIT: 70d75b32ada839d85a860029e4c9da0224fe57eb
+  IDB_COMMIT: 3f1bb6eb3ae7041ba4902605c6a5a4d686ccc3f8
 
 jobs:
   # Build the companion from the CURRENT commit's pin + patches (not from a

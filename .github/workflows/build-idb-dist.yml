@@ -10,7 +10,7 @@ on:
       idb_commit:
         description: "facebook/idb commit to build"
         required: true
-        default: "70d75b32ada839d85a860029e4c9da0224fe57eb"
+        default: "3f1bb6eb3ae7041ba4902605c6a5a4d686ccc3f8"
       release_tag:
         description: "Existing release tag to attach the artifact to (empty = artifact only)"
         required: false
