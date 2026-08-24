@@ -204,8 +204,8 @@
   "moduleExtensions": {
     "//idb:extensions.bzl%idb": {
       "general": {
-        "bzlTransitiveDigest": "fyEaYtbXqYMYrSdUTgyALCH/Qy72LfTjy2baKs1qnao=",
-        "usagesDigest": "UbTiM/e94oDGTiLtHnLTUT7Wv5HNXm8xV2tYvBdRhQA=",
+        "bzlTransitiveDigest": "zduNG9+2/DzgsoEhOV+4/J9GEnvexqFUH7qOPCc3XUE=",
+        "usagesDigest": "+woMczbqVJYdpqds7sS+L9g80J9bxOBpPP+SAJvhRLg=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools",
           "ENV:RULES_IDB_COMPANION_DIST_URL \\0",
@@ -216,9 +216,9 @@
             "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
             "attributes": {
               "urls": [
-                "https://github.com/erneestoc/rules_idb/releases/download/v0.1.2/idb-companion-dist.tar.gz"
+                "https://github.com/erneestoc/rules_idb/releases/download/v0.3.0/idb-companion-dist.tar.gz"
               ],
-              "sha256": "b647e14d79f51cb0bffdf433599536a84c1155f48d4deb92525320e713a5fa09",
+              "sha256": "1edd25393d4922ba08946b9f7dd3c84cd905004e0e775216713d8c9b75d3396a",
               "build_file_content": "\npackage(default_visibility = [\"//visibility:public\"])\n\nfilegroup(\n    name = \"dist\",\n    srcs = glob([\"**\"]),\n)\n\nexports_files([\"idb_companion\"])\n"
             }
           }
