@@ -10,8 +10,8 @@ docs/BUILDING_IDB.md).
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-COMPANION_RELEASE = "v0.1.2"
-COMPANION_SHA256 = "b647e14d79f51cb0bffdf433599536a84c1155f48d4deb92525320e713a5fa09"
+COMPANION_RELEASE = "v0.3.0"
+COMPANION_SHA256 = "1edd25393d4922ba08946b9f7dd3c84cd905004e0e775216713d8c9b75d3396a"
 
 _COMPANION_BUILD = """
 package(default_visibility = ["//visibility:public"])
