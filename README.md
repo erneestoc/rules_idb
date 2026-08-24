@@ -137,7 +137,7 @@ Runtime environment overrides: `RULES_IDB_IDB_PATH`,
 `RULES_IDB_COMPANION_PATH`, `RULES_IDB_POOL_DIR`, `RULES_IDB_POOL_SIZE`,
 `RULES_IDB_SHUTDOWN_SIMULATOR`, `RULES_IDB_COLLECT_LOGS`,
 `RULES_IDB_REPORT_ACTIVITIES`, `RULES_IDB_COLLECT_RESULT_BUNDLE`,
-`DEBUG_IDB_TEST_RUNNER`.
+`RULES_IDB_RECORD_VIDEO`, `DEBUG_IDB_TEST_RUNNER`.
 
 ### Test attachments
 
@@ -158,6 +158,26 @@ are not extracted as files.
 native test path does not emit one with the vendored companion — the runner
 warns when the requested bundle does not materialize. Use this only if a
 companion build that emits result bundles in the native path is in use.
+
+### Screen recording
+
+Set `RULES_IDB_RECORD_VIDEO` (via the test's `env` or `--test_env`) to capture
+the simulator screen to `screen.mp4` in the test's undeclared outputs:
+
+* `on-failure` (any value other than `always`) keeps the recording only when
+  the test fails — the common case for debugging a flaky UI test.
+* `always` keeps it on every run.
+
+Recording runs headless: the companion streams the simulator's IOSurface
+framebuffer directly, so no `Simulator.app` window is needed. It is a separate
+`idb` invocation on the same companion socket, started around the test and
+stopped (and flushed) when the run finishes.
+
+> Requires a companion built from the current `patches/idb-build-fixes.patch`.
+> The `RecordMethodHandler` fix that makes recording work is newer than the
+> `v0.1.2` released artifact; build one locally (see
+> [docs/BUILDING_IDB.md](docs/BUILDING_IDB.md)) and point
+> `RULES_IDB_COMPANION_PATH` at it, or use a release that post-dates the fix.
 
 ## How the simulator pool works
 

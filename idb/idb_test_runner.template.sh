@@ -19,6 +19,10 @@
 #   RULES_IDB_COLLECT_RESULT_BUNDLE  emit an .xcresult (with attachment
 #                             payloads) into undeclared outputs; implies
 #                             RULES_IDB_REPORT_ACTIVITIES
+#   RULES_IDB_RECORD_VIDEO    record the simulator screen to screen.mp4 in
+#                             undeclared outputs: "always" keeps every run,
+#                             "on-failure" (default for any other value) keeps
+#                             it only when the test fails
 #   DEBUG_IDB_TEST_RUNNER     set -x tracing
 
 set -euo pipefail
@@ -237,6 +241,12 @@ companion_pid=""
 companion_sock_dir=""
 cleanup() {
   local cleanup_exit_code=$?
+  # Stop any in-flight screen recorder (guarded: it may not be declared yet on
+  # a very early failure, and set -u is in effect).
+  if [[ -n "${recorder_pid:-}" ]]; then
+    kill -INT "$recorder_pid" 2>/dev/null || true
+    kill -9 "$recorder_pid" 2>/dev/null || true
+  fi
   if [[ -n "$companion_pid" ]]; then
     kill "$companion_pid" 2>/dev/null || true
     # The companion's gRPC server can ignore SIGTERM; make sure it dies.
@@ -772,6 +782,41 @@ kill_companion() {
   companion_pid=""
 }
 
+# Screen recording (opt-in via RULES_IDB_RECORD_VIDEO). idb streams the
+# simulator screen to an mp4 until it is signalled; we start it around the
+# test run and keep the file per the requested policy. Recording is a separate
+# idb invocation on the same companion socket, so it needs its own fd hygiene
+# (200/201 closed) or it would hold the pool slot lock after a SIGKILL.
+record_video_mode=""
+case "${RULES_IDB_RECORD_VIDEO:-}" in
+  "") record_video_mode="" ;;
+  always) record_video_mode="always" ;;
+  *) record_video_mode="on-failure" ;;
+esac
+recorder_pid=""
+recorded_video="$test_tmp_dir/screen.mp4"
+
+start_recording() {
+  [[ -n "$record_video_mode" ]] || return 0
+  rm -f "$recorded_video"
+  "$idb_bin" --companion "$companion_sock" video "$recorded_video" \
+    >> "$companion_log" 2>&1 200>&- 201>&- &
+  recorder_pid=$!
+}
+
+stop_recording() {
+  [[ -n "$recorder_pid" ]] || return 0
+  # idb stops recording and flushes the mp4 on SIGINT; give it a moment to
+  # finish writing before anyone reads the file.
+  kill -INT "$recorder_pid" 2>/dev/null || true
+  for _ in $(seq 1 25); do
+    kill -0 "$recorder_pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  kill -9 "$recorder_pid" 2>/dev/null || true
+  recorder_pid=""
+}
+
 spawn_companion() {
   companion_start_ms=$(now_ms)
   rm -f "$companion_sock"
@@ -1055,7 +1100,9 @@ fi
 run_idb_once() {
   test_exit_code=0
   idb_start_ms=$(now_ms)
+  start_recording
   "${idb_cmd[@]}" 2>&1 200>&- | tee -i "$testlog" || test_exit_code=$?
+  stop_recording
   idb_ms=$(( $(now_ms) - idb_start_ms ))
   idb_exit_code=$test_exit_code
 
@@ -1282,6 +1329,22 @@ if [[ "$collect_coverage" == true ]]; then
         cat "$error_file" >&2
         [[ "$llvm_cov_json_export_status" -ne 0 ]] || llvm_cov_json_export_status=1
       fi
+    fi
+  fi
+fi
+
+# Keep the screen recording per policy: always, or only when the test failed.
+# Placed here, after every test_exit_code adjustment (output-parse failures,
+# false-negative crashes, coverage failures) has run: idb exits 0 even when a
+# test case fails, so an earlier check would see test_exit_code == 0 and drop
+# the video on exactly the failing runs we want it for. A missing file
+# (recorder produced nothing) is warned about, not fatal.
+if [[ -n "$record_video_mode" && -n "${TEST_UNDECLARED_OUTPUTS_DIR:-}" ]]; then
+  if [[ "$record_video_mode" == "always" || "$test_exit_code" -ne 0 ]]; then
+    if [[ -s "$recorded_video" ]]; then
+      mv "$recorded_video" "$TEST_UNDECLARED_OUTPUTS_DIR/screen.mp4"
+    else
+      echo "warning: RULES_IDB_RECORD_VIDEO was set but no screen recording was produced" >&2
     fi
   fi
 fi

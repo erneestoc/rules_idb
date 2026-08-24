@@ -61,5 +61,42 @@ bazel test //examples:SwiftTestingTestsSharded --local_test_jobs=1 --nocache_tes
 check "sharded swift-testing bundle is rejected" "[[ $? -ne 0 ]]"
 check "rejection explains why" "grep -q 'Swift Testing (@Test) tests' '$TL/examples/SwiftTestingTestsSharded/shard_1_of_2/test.log'"
 
+# 10. Screen recording (RULES_IDB_RECORD_VIDEO). Requires a companion built
+# from the current patch set: the released artifact predates the
+# RecordMethodHandler single-iterator fix and crashes on record, so CI (which
+# builds the companion from patches/idb-build-fixes.patch) exercises these but
+# a stale local companion self-skips with a NOTE instead of failing spuriously.
+# The probe run also confirms the fix: an unpatched companion produces no file.
+rec_mp4() { echo "$TL/examples/$1/test.outputs/screen.mp4"; }
+# Forward a locally built companion to the test action when the dev exports
+# RULES_IDB_COMPANION_PATH; in CI the patched companion is already ambient.
+comp_env=()
+[[ -n "${RULES_IDB_COMPANION_PATH:-}" ]] && \
+  comp_env=(--test_env=RULES_IDB_COMPANION_PATH="$RULES_IDB_COMPANION_PATH")
+rm -f "$(rec_mp4 UITests)"
+bazel test //examples:UITests --nocache_test_results --test_output=summary \
+  "${comp_env[@]}" --test_env=RULES_IDB_RECORD_VIDEO=always >/dev/null 2>&1
+if [[ -s "$(rec_mp4 UITests)" ]]; then
+  check "record=always keeps a video on a passing run" "[[ -s '$(rec_mp4 UITests)' ]]"
+  check "recorded file is a real mp4 (ftyp/moov)" \
+    "grep -qa ftyp '$(rec_mp4 UITests)' && grep -qa moov '$(rec_mp4 UITests)'"
+
+  rm -f "$(rec_mp4 UITests)"
+  bazel test //examples:UITests --nocache_test_results --test_output=summary \
+    "${comp_env[@]}" --test_env=RULES_IDB_RECORD_VIDEO=on-failure >/dev/null 2>&1
+  check "record=on-failure discards video when the test passes" \
+    "[[ ! -s '$(rec_mp4 UITests)' ]]"
+
+  rm -f "$(rec_mp4 FailingUITests)"
+  bazel test //examples:FailingUITests --nocache_test_results --test_output=summary \
+    "${comp_env[@]}" --test_env=RULES_IDB_RECORD_VIDEO=on-failure >/dev/null 2>&1
+  check "record=on-failure keeps a video when the test fails" \
+    "[[ -s '$(rec_mp4 FailingUITests)' ]]"
+else
+  echo "NOTE: skipping screen-recording checks — the active idb_companion cannot"
+  echo "      record (released artifact predates the fix). Build one from"
+  echo "      patches/idb-build-fixes.patch and re-run; see docs/BUILDING_IDB.md."
+fi
+
 echo
 if [[ $fails -eq 0 ]]; then echo "ALL BEHAVIORAL CHECKS PASSED"; else echo "$fails CHECK(S) FAILED"; exit 1; fi
