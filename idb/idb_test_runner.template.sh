@@ -440,6 +440,10 @@ else
   fi
   pool_dir="$pool_root/$pool_key"
   mkdir -p "$pool_dir"
+  # Emit the resolved environment-derived limits once per action. This makes
+  # remote-run logs sufficient to verify that a worker received the intended
+  # pool contract, rather than inferring it later from simulator names.
+  echo "note: idb pool config root=$pool_root pool=$pool_key size=$pool_size warm=$warm_pool_size max_concurrent_boots=$max_concurrent_boots" >&2
 
   # Locks the given fd (inherited from this shell) without blocking; exits
   # 1 if the lock is held by another test action.
