@@ -33,6 +33,13 @@
 #   RULES_IDB_STALL_SECS      fail fast if idb emits nothing for this many
 #                             seconds, instead of hanging until the test
 #                             timeout with no diagnostics (0/unset = off)
+#   RULES_IDB_STARTUP_GRACE_SECS  how long to wait after the host app is
+#                             launched for the first test result before
+#                             concluding startup is stuck (default 120s; a
+#                             framework that fails to load, or a crash in
+#                             didFinishLaunching, lands here). Cannot mistake a
+#                             slow test for a stall, since no test has started.
+#                             0 disables
 #   RULES_IDB_CRASH_GRACE_SECS  how long to wait after a test reports that the
 #                             host crashed before concluding idb will never
 #                             return a result. That record is terminal, so the
@@ -1151,7 +1158,7 @@ cat > "$stream_monitor" <<'PYEOF'
 """Copy stdin to stdout, recording when idb reaches notable phases.
 
 argv: <markers.json> <stall_seconds|0> <idb_pid_file> [crash_grace_seconds|0]
-      [companion_log]
+      [companion_log] [startup_grace_seconds|0]
 
 Markers are seconds elapsed since this process started, which is close enough
 to the start of the idb command for phase accounting. A stall is "no output at
@@ -1172,13 +1179,24 @@ crash_grace_s = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
 # client, the JSON stream stays empty while the companion log still records the
 # crash. Watch that too, so an empty stream is not an unbounded wait.
 companion_log = sys.argv[5] if len(sys.argv) > 5 else ""
+# Once the host app has been launched, installation is done and a test bundle
+# should connect and start reporting within seconds. Silence after this point
+# means startup is stuck -- and unlike a gap between test results, it cannot be
+# a slow test, because no test has run yet. idb's own bundleReadyTimeout is 60s,
+# so the default grace sits comfortably above it.
+COMPANION_LAUNCH_MARKER = "Launching Application"
 COMPANION_CRASH_MARKERS = (
     "Crashed: Crash Info:",
     "Bundle disconnected, but test plan has not completed",
     "Lost connection to test process",
     "The host application is likely to have crashed",
 )
+startup_grace_s = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
+app_launched_at = None
 companion_offset = 0
+# Overlap carried between polls: a marker can straddle two reads, and searching
+# each chunk in isolation would then never match it.
+companion_tail = ""
 crash_seen_at = None
 kill_deadline = None
 
@@ -1239,9 +1257,11 @@ def note(line):
 
 
 def poll_companion_log():
-    """Arm the crash grace if the companion has reported the host dying."""
-    global companion_offset, crash_seen_at
-    if not companion_log or crash_seen_at is not None:
+    """Watch the companion log for app launch and for host-death reports."""
+    global companion_offset, companion_tail, crash_seen_at, app_launched_at
+    if not companion_log:
+        return
+    if crash_seen_at is not None and app_launched_at is not None:
         return
     try:
         size = os.path.getsize(companion_log)
@@ -1253,13 +1273,20 @@ def poll_companion_log():
         companion_offset = size
     except OSError:
         return
-    text = chunk.decode("utf-8", "replace")
-    for marker in COMPANION_CRASH_MARKERS:
-        if marker in text:
-            crash_seen_at = time.monotonic()
-            marks["companion_reported_crash"] = round(crash_seen_at - start, 3)
-            flush_marks()
-            return
+    text = companion_tail + chunk.decode("utf-8", "replace")
+    # Keep enough of the tail that a marker split across two polls still matches.
+    companion_tail = text[-256:]
+    if app_launched_at is None and COMPANION_LAUNCH_MARKER in text:
+        app_launched_at = time.monotonic()
+        marks["app_launched"] = round(app_launched_at - start, 3)
+        flush_marks()
+    if crash_seen_at is None:
+        for marker in COMPANION_CRASH_MARKERS:
+            if marker in text:
+                crash_seen_at = time.monotonic()
+                marks["companion_reported_crash"] = round(crash_seen_at - start, 3)
+                flush_marks()
+                return
 
 
 flush_marks()
@@ -1273,7 +1300,7 @@ while True:
         deadlines.append(crash_grace_s - (now - crash_seen_at))
     if kill_deadline is not None:
         deadlines.append(kill_deadline - now)
-    if companion_log and crash_seen_at is None:
+    if companion_log and (crash_seen_at is None or app_launched_at is None):
         # Poll cadence, so an empty client stream still gets noticed.
         deadlines.append(1.0)
     timeout = None if not deadlines else max(0.25, min(deadlines))
@@ -1313,6 +1340,26 @@ while True:
             # Escalate if it does not go away: the point of this path is that
             # the pipeline must close, so never fall back to waiting forever.
             crash_grace_s, stall_s, kill_deadline = 0, 0, time.monotonic() + 10
+            continue
+        # Launched, but no test has ever reported: startup is stuck. This
+        # cannot be a slow test, because no test has started.
+        if startup_grace_s > 0 and app_launched_at is not None \
+                and "last_test_event" not in marks \
+                and now - app_launched_at >= startup_grace_s:
+            sys.stderr.write(
+                "\nerror: the app launched %.0fs ago and no test has reported yet.\n"
+                "       The test bundle never connected -- the host most likely "
+                "crashed or failed to load a framework during startup.\n"
+                "       Terminating idb rather than waiting out the test timeout.\n"
+                "       (RULES_IDB_STARTUP_GRACE_SECS=%.0f; 0 disables)\n"
+                % (now - app_launched_at, startup_grace_s)
+            )
+            sys.stderr.flush()
+            marks["startup_grace_expired_after"] = round(now - app_launched_at, 3)
+            flush_marks()
+            signal_idb(signal.SIGTERM)
+            startup_grace_s, crash_grace_s, stall_s = 0, 0, 0
+            kill_deadline = time.monotonic() + 10
             continue
         elapsed = now - last_line
         if stall_s > 0 and elapsed >= stall_s:
@@ -1467,6 +1514,7 @@ run_idb_once() {
     | tee -i "$testlog" \
     | "$python_bin" "$stream_monitor" "$markers_file" "${RULES_IDB_STALL_SECS:-0}" \
         "$idb_pid_file" "$crash_grace_secs" "$companion_log" \
+        "${RULES_IDB_STARTUP_GRACE_SECS:-120}" \
     || test_exit_code=$?
   stop_recording
   idb_ms=$(( $(now_ms) - idb_start_ms ))

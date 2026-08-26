@@ -98,6 +98,20 @@ ios_unit_test(
     deps = [":CrashingTestsLib"],
 )
 
+# The host app crashes during launch, before the test bundle can connect, so
+# idb's client receives no test results at all. Reproduces the "empty JSON
+# stream" variant of the companion hang.
+ios_unit_test(
+    name = "LaunchCrashTests",
+    size = "medium",
+    env = {"IDB_REPRO_CRASH_ON_LAUNCH": "1"},
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    tags = ["manual"],
+    test_host = ":HostApp",
+    deps = [":HostedTestsLib"],
+)
+
 # Intentionally failing; used to validate the runner's failure detection.
 ios_unit_test(
     name = "FailingTests",

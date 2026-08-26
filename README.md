@@ -138,7 +138,8 @@ Runtime environment overrides: `RULES_IDB_IDB_PATH`,
 `RULES_IDB_SHUTDOWN_SIMULATOR`, `RULES_IDB_COLLECT_LOGS`,
 `RULES_IDB_REPORT_ACTIVITIES`, `RULES_IDB_COLLECT_RESULT_BUNDLE`,
 `RULES_IDB_RECORD_VIDEO`, `RULES_IDB_CRASH_WAIT_SECS`,
-`RULES_IDB_CRASH_GRACE_SECS`, `RULES_IDB_STALL_SECS`, `DEBUG_IDB_TEST_RUNNER`.
+`RULES_IDB_CRASH_GRACE_SECS`, `RULES_IDB_STARTUP_GRACE_SECS`,
+`RULES_IDB_STALL_SECS`, `DEBUG_IDB_TEST_RUNNER`.
 
 ### Diagnosing a hung or disconnected test run
 
@@ -175,21 +176,53 @@ Each run also reports `timing last_test_event_at=… trailing=…`: the gap
 between the final test result and the end of the idb phase. A large trailing
 value is the signature of a post-disconnect wait rather than slow tests.
 
-**A crashed test host is handled without waiting.** When a test reports
-`crashed`, the host process is gone: XCTest cannot continue in a dead process
-and idb does not relaunch it, so that record is the last result the stream can
-carry. The companion log is watched for the same thing, which covers the case
-where the host dies before any result reaches the client and the JSON stream
-stays empty. The runner therefore stops waiting shortly afterwards rather than
-sitting until the test timeout — `RULES_IDB_CRASH_GRACE_SECS` controls how
-long, defaulting to 5s, or 60s when result bundles, coverage or logs were
-requested and idb legitimately still has artifacts to assemble. Set it to 0 to
-disable. This turns a multi-minute hang into a failure reported in seconds,
-with the crash recorded as a failing test case.
+### Three ways a run can appear to hang, and what bounds each
 
-`RULES_IDB_STALL_SECS` (off by default) is the general case: it fails the run
-if idb emits nothing at all for that many seconds, whether or not a crash was
-reported.
+These are distinct mechanisms with distinct fixes. `examples:CrashingTests`
+and `examples:LaunchCrashTests` reproduce the first two; measured on an M4 Max
+with Xcode 26.2.
+
+| | What happens | Baseline | With defaults | Tuned |
+|---|---|---|---|---|
+| **Crash mid-run** | a test reports `crashed`; idb never returns a terminal result | timeout | **11.9s** | 11.5s |
+| **Crash during startup** | the bundle never connects; client stream stays empty | timeout | **124.4s** | **47.1s** |
+| **Silence, cause unknown** | no output, no crash reported anywhere | timeout | timeout | bounded by `RULES_IDB_STALL_SECS` |
+
+**Crash mid-run.** When a test reports `crashed` the host process is gone:
+XCTest cannot continue in a dead process and idb does not relaunch it, so that
+record is the last result the stream can carry. (Verified: a bundle whose
+middle test crashes reports nothing at all for the test after it.) The runner
+waits only `RULES_IDB_CRASH_GRACE_SECS` afterwards — 5s by default, 60s when
+result bundles, coverage or logs were requested and idb legitimately still has
+artifacts to assemble.
+
+**Crash during startup** — a framework that fails to load, or a crash in
+`didFinishLaunching`. This one is *not* idb hanging: it is idb serving out two
+internal timeouts, `bundleReadyTimeout` (60s) then `crashCheckWaitLimit` (120s),
+and the companion logs nothing until both expire. Two independent knobs bound
+it:
+
+* `RULES_IDB_CRASH_WAIT_SECS` removes the 120s crash-report wait (measured:
+  195s → 73s). It is exported to the companion as `FBXCTEST_CRASH_WAIT_TIMEOUT`;
+  `--test_env` alone cannot reach XCTestBootstrap, which runs inside the
+  companion.
+* `RULES_IDB_STARTUP_GRACE_SECS` (default 120s) bounds it without any
+  configuration. The clock starts when the companion logs the app launch, and
+  only runs while *no test has reported yet* — so it cannot mistake a slow test
+  for a stall, because no test has started. idb's own `bundleReadyTimeout` is
+  60s, so the default sits well clear of any legitimate startup.
+
+**Silence with no crash reported** is the residual case, covered by
+`RULES_IDB_STALL_SECS` (off by default, since a long gap between results can be
+a legitimately slow test).
+
+For remote execution, where a hung action can trigger retries rather than
+returning the real failure, this combination is a reasonable starting point:
+
+```
+--test_env=RULES_IDB_CRASH_WAIT_SECS=5
+--test_env=RULES_IDB_STALL_SECS=45
+```
 
 A test-process disconnect that prevents results from being reported is
 represented as a failing test case in the JUnit XML, not only as a non-zero
