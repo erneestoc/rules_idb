@@ -1151,6 +1151,7 @@ cat > "$stream_monitor" <<'PYEOF'
 """Copy stdin to stdout, recording when idb reaches notable phases.
 
 argv: <markers.json> <stall_seconds|0> <idb_pid_file> [crash_grace_seconds|0]
+      [companion_log]
 
 Markers are seconds elapsed since this process started, which is close enough
 to the start of the idb command for phase accounting. A stall is "no output at
@@ -1166,6 +1167,18 @@ markers_path, stall_s, pid_path = sys.argv[1], float(sys.argv[2]), sys.argv[3]
 # after it is pure dead time. The grace only covers idb's own finalisation
 # (result bundle, coverage, log collection) before we conclude it is stuck.
 crash_grace_s = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
+# The client stream is not the only place a host crash shows up, and sometimes
+# it is not there at all: if the host dies before any result reaches the
+# client, the JSON stream stays empty while the companion log still records the
+# crash. Watch that too, so an empty stream is not an unbounded wait.
+companion_log = sys.argv[5] if len(sys.argv) > 5 else ""
+COMPANION_CRASH_MARKERS = (
+    "Crashed: Crash Info:",
+    "Bundle disconnected, but test plan has not completed",
+    "Lost connection to test process",
+    "The host application is likely to have crashed",
+)
+companion_offset = 0
 crash_seen_at = None
 kill_deadline = None
 
@@ -1225,6 +1238,30 @@ def note(line):
             marks[name] = round(time.monotonic() - start, 3)
 
 
+def poll_companion_log():
+    """Arm the crash grace if the companion has reported the host dying."""
+    global companion_offset, crash_seen_at
+    if not companion_log or crash_seen_at is not None:
+        return
+    try:
+        size = os.path.getsize(companion_log)
+        if size <= companion_offset:
+            return
+        with open(companion_log, "rb") as f:
+            f.seek(companion_offset)
+            chunk = f.read(size - companion_offset)
+        companion_offset = size
+    except OSError:
+        return
+    text = chunk.decode("utf-8", "replace")
+    for marker in COMPANION_CRASH_MARKERS:
+        if marker in text:
+            crash_seen_at = time.monotonic()
+            marks["companion_reported_crash"] = round(crash_seen_at - start, 3)
+            flush_marks()
+            return
+
+
 flush_marks()
 buffer = b""
 while True:
@@ -1236,9 +1273,13 @@ while True:
         deadlines.append(crash_grace_s - (now - crash_seen_at))
     if kill_deadline is not None:
         deadlines.append(kill_deadline - now)
+    if companion_log and crash_seen_at is None:
+        # Poll cadence, so an empty client stream still gets noticed.
+        deadlines.append(1.0)
     timeout = None if not deadlines else max(0.25, min(deadlines))
     ready, _, _ = select.select([fd], [], [], timeout)
     if not ready:
+        poll_companion_log()
         now = time.monotonic()
         if kill_deadline is not None and now >= kill_deadline:
             sys.stderr.write("       idb did not exit on SIGTERM; sending SIGKILL.\n")
@@ -1253,14 +1294,17 @@ while True:
             if buffer:
                 note(buffer.decode("utf-8", "replace"))
             sys.stderr.write(
-                "\nerror: the test host crashed %.0fs ago and idb has still not "
-                "returned a result.\n"
+                "\nerror: the test host crashed %.0fs ago (per %s) and idb has "
+                "still not returned a result.\n"
                 "       Nothing further can arrive: XCTest cannot continue in a "
                 "crashed process.\n"
                 "       Terminating idb so the failure is reported now rather than "
                 "at the test timeout.\n"
                 "       (grace period: RULES_IDB_CRASH_GRACE_SECS=%.0f)\n"
-                % (now - crash_seen_at, crash_grace_s)
+                % (now - crash_seen_at,
+                   "the companion log" if "companion_reported_crash" in marks
+                   else "the test result stream",
+                   crash_grace_s)
             )
             sys.stderr.flush()
             marks["crash_grace_expired_after"] = round(now - crash_seen_at, 3)
@@ -1422,7 +1466,7 @@ run_idb_once() {
   { "${idb_cmd[@]}" 2>&1 200>&- & idb_child=$!; echo "$idb_child" > "$idb_pid_file"; wait "$idb_child"; } \
     | tee -i "$testlog" \
     | "$python_bin" "$stream_monitor" "$markers_file" "${RULES_IDB_STALL_SECS:-0}" \
-        "$idb_pid_file" "$crash_grace_secs" \
+        "$idb_pid_file" "$crash_grace_secs" "$companion_log" \
     || test_exit_code=$?
   stop_recording
   idb_ms=$(( $(now_ms) - idb_start_ms ))

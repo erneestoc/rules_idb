@@ -178,7 +178,9 @@ value is the signature of a post-disconnect wait rather than slow tests.
 **A crashed test host is handled without waiting.** When a test reports
 `crashed`, the host process is gone: XCTest cannot continue in a dead process
 and idb does not relaunch it, so that record is the last result the stream can
-carry. The runner therefore stops waiting shortly afterwards rather than
+carry. The companion log is watched for the same thing, which covers the case
+where the host dies before any result reaches the client and the JSON stream
+stays empty. The runner therefore stops waiting shortly afterwards rather than
 sitting until the test timeout — `RULES_IDB_CRASH_GRACE_SECS` controls how
 long, defaulting to 5s, or 60s when result bundles, coverage or logs were
 requested and idb legitimately still has artifacts to assemble. Set it to 0 to
