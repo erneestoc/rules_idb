@@ -502,6 +502,31 @@ index fccbeeb..426c58e 100644
          switch request.control {
          case .start:
            throw GRPCStatus(code: .failedPrecondition, message: "Video streaming already started")
+diff --git a/Companion/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift
+index 41280c5..8f474b7 100644
+--- a/Companion/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift
++++ b/Companion/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift
+@@ -44,7 +44,19 @@ struct XCTestRunMethodHandler {
+       }
+     }
+ 
+-    _ = try await reporter.awaitReportingTerminated()
++    // Reporting must terminate for this RPC to complete. If it does not -- the
++    // terminal response failed to write, or the test host died in a way that
++    // left the reporter without a final event -- returning is far better than
++    // holding the stream open until the client times out, because the client
++    // has no way to tell "still running" from "never going to finish".
++    do {
++      _ = try await reporter.awaitReportingTerminated()
++    } catch {
++      logger.error().log("Test reporting terminated with an error: \(error.localizedDescription)")
++      throw GRPCStatus(
++        code: .internalError,
++        message: "xctest run ended without a terminal test result: \(error.localizedDescription)")
++    }
+   }
+ 
+   func transform(value request: Idb_XctestRunRequest) -> FBXCTestRunRequest? {
 diff --git a/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift
 index d99881f..bd4e046 100644
 --- a/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift
@@ -542,6 +567,33 @@ index 5051d98..40422a0 100644
    var requiredNext: Element {
      get async throws {
        guard let next = try await first(where: { _ in true }) else {
+diff --git a/Companion/Utility/IDBXCTestReporter/IDBXCTestReporter.swift b/Companion/Utility/IDBXCTestReporter/IDBXCTestReporter.swift
+index 1b53b23..8aeba87 100644
+--- a/Companion/Utility/IDBXCTestReporter/IDBXCTestReporter.swift
++++ b/Companion/Utility/IDBXCTestReporter/IDBXCTestReporter.swift
+@@ -411,7 +411,21 @@ final class IDBXCTestReporter: NSObject, FBXCTestReporter, FBDataConsumer, @unch
+       return
+     }
+ 
+-    try await responseStream.send(response)
++    do {
++      try await responseStream.send(response)
++    } catch {
++      // The stream has already been taken out of `_responseStream` above, so no
++      // later write can settle `reportingTerminated`. Failing it here is what
++      // keeps `awaitReportingTerminated()` -- and therefore the RPC -- from
++      // hanging until the client's own timeout when the terminal write fails
++      // (for example NIOAsyncWriterError.alreadyFinished when the response
++      // writer was closed underneath us).
++      if shouldCloseStream {
++        logger.error().log("Failed to write the terminal xctest response (\(error.localizedDescription)); terminating reporting with that error")
++        reportingTerminated.fail(error)
++      }
++      throw error
++    }
+ 
+     if shouldCloseStream {
+       logger.log("Test Reporting has finished with status \(response.status)")
 diff --git a/Companion/Utility/MultisourceFileReader.swift b/Companion/Utility/MultisourceFileReader.swift
 index bef25d5..2dab4bc 100644
 --- a/Companion/Utility/MultisourceFileReader.swift
@@ -903,6 +955,78 @@ index d2a63aa..1733c2e 100644
          }
        }
      }
+diff --git a/XCTestBootstrap/TestManager/FBTestBundleConnection.swift b/XCTestBootstrap/TestManager/FBTestBundleConnection.swift
+index 4fd48a2..82d567f 100644
+--- a/XCTestBootstrap/TestManager/FBTestBundleConnection.swift
++++ b/XCTestBootstrap/TestManager/FBTestBundleConnection.swift
+@@ -26,11 +26,14 @@ enum FBTestBundleConnectionError: Error {
+   case connectionLost(message: String)
+   case processStillRunning(processIdentifier: pid_t)
+   case unexpectedCrashLookupResult(processIdentifier: pid_t)
++  case hostExitedBeforeBundleReady
+ }
+ 
+ extension FBTestBundleConnectionError: LocalizedError {
+   var errorDescription: String? {
+     switch self {
++    case .hostExitedBeforeBundleReady:
++      return "Error while establishing connection to test bundle: the test host process exited before the test bundle connected, so it cannot become ready."
+     case .hostRelaunchedByOS:
+       return "Error while establishing connection to test bundle: Running test host application pid is different from the pid launched and set up to execute the tests. The host application is likely to have crashed during startup and been relaunched by iOS."
+     case let .hostStalled(processIdentifier, stackshot):
+diff --git a/XCTestBootstrap/TestManager/FBTestBundleDTXConnection.m b/XCTestBootstrap/TestManager/FBTestBundleDTXConnection.m
+index 60c285c..97b3226 100644
+--- a/XCTestBootstrap/TestManager/FBTestBundleDTXConnection.m
++++ b/XCTestBootstrap/TestManager/FBTestBundleDTXConnection.m
+@@ -39,6 +39,21 @@
+ static NSTimeInterval const IDEInterfaceReadyTimeout = 60; // Time for `XCTestManager_IDEInterface` to be returned.
+ static NSTimeInterval const DaemonSessionReadyTimeout = 60; // Time for `_IDE_initiateSessionWithIdentifier` to be returned.
+ 
++// These bound how long a *failed* startup takes to be reported: a host that
++// crashes before the bundle connects is only noticed once they expire, and a
++// caller that already knows its own deadline has no way to shorten that.
++// `FBXCTEST_CRASH_WAIT_TIMEOUT` sets the same precedent for the crash-log wait
++// in FBTestBundleConnection.
++static NSTimeInterval FBXCTestBootstrapTimeout(NSString *variable, NSTimeInterval fallback)
++{
++  NSString *value = NSProcessInfo.processInfo.environment[variable];
++  if (value.length == 0) {
++    return fallback;
++  }
++  NSTimeInterval parsed = value.doubleValue;
++  return parsed > 0 ? parsed : fallback;
++}
++
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wprotocol"
+ #pragma clang diagnostic ignored "-Wincomplete-implementation"
+@@ -187,7 +202,7 @@ - (void)forwardInvocation:(NSInvocation *)invocation
+ - (FBFuture<NSNull *> *)waitForBundleReady
+ {
+   [self.logger log:@"Waiting for test bundle to be ready.."];
+-  return [self.bundleReadyFuture timeout:BundleReadyTimeout waitingFor:@"Bundle Ready to be called"];
++  return [self.bundleReadyFuture timeout:FBXCTestBootstrapTimeout(@"FBXCTEST_BUNDLE_READY_TIMEOUT", BundleReadyTimeout) waitingFor:@"Bundle Ready to be called"];
+ }
+ 
+ - (void)startExecutingTestPlan
+@@ -223,7 +238,7 @@ - (BOOL)testPlanCompleted
+   [self.logger log:@"Resuming the test bundle connection."];
+   [connection resume];
+ 
+-  return [future timeout:IDEInterfaceReadyTimeout waitingFor:@"XCTestManager_IDEInterface to be ready"];
++  return [future timeout:FBXCTestBootstrapTimeout(@"FBXCTEST_IDE_INTERFACE_TIMEOUT", IDEInterfaceReadyTimeout) waitingFor:@"XCTestManager_IDEInterface to be ready"];
+ }
+ 
+ - (FBFuture<NSNumber *> *)sendStartSessionRequestWithConnection:(DTXConnection *)connection
+@@ -258,7 +273,7 @@ - (BOOL)testPlanCompleted
+     [future resolveWithResult:version];
+   }];
+ 
+-  return [future timeout:DaemonSessionReadyTimeout waitingFor:[NSString stringWithFormat:@"%@ to be resolved", sessionStartMethod]];
++  return [future timeout:FBXCTestBootstrapTimeout(@"FBXCTEST_DAEMON_SESSION_TIMEOUT", DaemonSessionReadyTimeout) waitingFor:[NSString stringWithFormat:@"%@ to be resolved", sessionStartMethod]];
+ }
+ 
+ - (void)concludeWithError:(NSError *)error
 diff --git a/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift b/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift
 index 7945ff8..82730fd 100644
 --- a/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift

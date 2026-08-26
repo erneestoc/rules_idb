@@ -24,6 +24,7 @@
 #                             "on-failure" (default for any other value) keeps
 #                             it only when the test fails
 #   RULES_IDB_CRASH_WAIT_SECS  bound idb's post-disconnect crash-log wait
+#                             (default 15s here; idb's own default is 120s)
 #                             (exported to the companion as
 #                             FBXCTEST_CRASH_WAIT_TIMEOUT; idb defaults to
 #                             120s, spent silently after a test-process
@@ -33,6 +34,12 @@
 #   RULES_IDB_STALL_SECS      fail fast if idb emits nothing for this many
 #                             seconds, instead of hanging until the test
 #                             timeout with no diagnostics (0/unset = off)
+#   RULES_IDB_BUNDLE_READY_SECS  how long idb waits for the test bundle to
+#                             connect before treating startup as failed
+#                             (default 25s here; upstream hardcodes 60s and
+#                             the vendored patch makes it configurable. Raise
+#                             it if a healthy launch legitimately takes longer
+#                             to hand control to XCTest)
 #   RULES_IDB_STARTUP_GRACE_SECS  how long to wait after the host app is
 #                             launched for the first test result before
 #                             concluding startup is stuck (default 120s; a
@@ -941,9 +948,27 @@ spawn_companion() {
   # $HOME) or if the host was jetsam-killed, since that writes a JetsamEvent
   # report rather than a pid-matching crash log.
   local -a companion_env=()
-  if [[ -n "${RULES_IDB_CRASH_WAIT_SECS:-}" ]]; then
-    companion_env+=("FBXCTEST_CRASH_WAIT_TIMEOUT=$RULES_IDB_CRASH_WAIT_SECS")
-  fi
+  # Default this down from idb's 120s. It is only ever reached after the test
+  # host has already died, so a shorter wait cannot affect a passing run: it
+  # only decides how long a failure takes to be reported. A crash report that
+  # is going to appear appears within a few seconds; one that never appears
+  # (an unreadable reports directory, or a memory kill, which writes a
+  # JetsamEvent rather than a pid-matching crash log) never will.
+  companion_env+=("FBXCTEST_CRASH_WAIT_TIMEOUT=${RULES_IDB_CRASH_WAIT_SECS:-5}")
+  # How long idb waits for the test bundle to connect before declaring the
+  # startup failed. Upstream hardcodes 60s; the vendored patch makes it
+  # configurable, which is the difference between noticing a host that died
+  # during launch in seconds rather than a minute.
+  # A healthy launch reaches its first test result in a couple of seconds;
+  # upstream's 60s exists to tolerate a slow one, and is paid in full whenever
+  # a host dies during startup. 25s keeps a large margin over any healthy
+  # launch observed here while cutting the failure case substantially. An app
+  # that genuinely takes longer to hand control to XCTest should raise this;
+  # the failure message says so.
+  local bundle_ready_secs="${RULES_IDB_BUNDLE_READY_SECS:-25}"
+  companion_env+=("FBXCTEST_BUNDLE_READY_TIMEOUT=$bundle_ready_secs"
+                  "FBXCTEST_IDE_INTERFACE_TIMEOUT=$bundle_ready_secs"
+                  "FBXCTEST_DAEMON_SESSION_TIMEOUT=$bundle_ready_secs")
   env ${companion_env[@]+"${companion_env[@]}"} \
     "$companion_bin" --udid "$simulator_id" --grpc-domain-sock "$companion_sock" >> "$companion_log" 2>&1 200>&- 201>&- &
   companion_pid=$!
@@ -1499,7 +1524,9 @@ elif [[ "$collect_coverage" == true || -n "${RULES_IDB_COLLECT_RESULT_BUNDLE:-}"
      || -n "${RULES_IDB_COLLECT_LOGS:-}" ]]; then
   crash_grace_secs=60
 else
-  crash_grace_secs=5
+  # Nothing left to collect, so the only thing this covers is idb noticing the
+  # crash it has already been told about.
+  crash_grace_secs=2
 fi
 
 run_idb_once() {

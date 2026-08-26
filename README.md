@@ -184,8 +184,8 @@ with Xcode 26.2.
 
 | | What happens | Baseline | With defaults | Tuned |
 |---|---|---|---|---|
-| **Crash mid-run** | a test reports `crashed`; idb never returns a terminal result | timeout | **11.9s** | 11.5s |
-| **Crash during startup** | the bundle never connects; client stream stays empty | timeout | **124.4s** | **47.1s** |
+| **Crash mid-run** | a test reports `crashed`; idb never returns a terminal result | timeout | **8.6s** | — |
+| **Crash during startup** | the bundle never connects; client stream stays empty | timeout | **35.8s** | — |
 | **Silence, cause unknown** | no output, no crash reported anywhere | timeout | timeout | bounded by `RULES_IDB_STALL_SECS` |
 
 **Crash mid-run.** When a test reports `crashed` the host process is gone:
@@ -202,10 +202,20 @@ internal timeouts, `bundleReadyTimeout` (60s) then `crashCheckWaitLimit` (120s),
 and the companion logs nothing until both expire. Two independent knobs bound
 it:
 
-* `RULES_IDB_CRASH_WAIT_SECS` removes the 120s crash-report wait (measured:
-  195s → 73s). It is exported to the companion as `FBXCTEST_CRASH_WAIT_TIMEOUT`;
-  `--test_env` alone cannot reach XCTestBootstrap, which runs inside the
-  companion.
+Both are now bounded by default, so neither needs configuring:
+
+* `RULES_IDB_CRASH_WAIT_SECS` (default 5s, idb's own default is 120s) bounds
+  the crash-report wait. This path is only reached once the host has already
+  died, so shortening it cannot affect a passing run.
+* `RULES_IDB_BUNDLE_READY_SECS` (default 25s, upstream hardcodes 60s) bounds
+  how long idb waits for the test bundle to connect. Upstream provides no way
+  to change this; the vendored patch adds one, following the precedent
+  `FBXCTEST_CRASH_WAIT_TIMEOUT` already sets in the same subsystem. A healthy
+  launch reaches its first result in a couple of seconds; raise this if yours
+  legitimately takes longer.
+
+Both are exported to the companion, because XCTestBootstrap runs inside it and
+`--test_env` alone cannot reach it.
 * `RULES_IDB_STARTUP_GRACE_SECS` (default 120s) bounds it without any
   configuration. The clock starts when the companion logs the app launch, and
   only runs while *no test has reported yet* — so it cannot mistake a slow test
@@ -217,10 +227,10 @@ it:
 a legitimately slow test).
 
 For remote execution, where a hung action can trigger retries rather than
-returning the real failure, this combination is a reasonable starting point:
+returning the real failure, `RULES_IDB_STALL_SECS` is worth setting as a
+backstop for the residual case:
 
 ```
---test_env=RULES_IDB_CRASH_WAIT_SECS=5
 --test_env=RULES_IDB_STALL_SECS=45
 ```
 
