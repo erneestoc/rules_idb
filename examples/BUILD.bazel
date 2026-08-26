@@ -79,6 +79,25 @@ swift_library(
     module_name = "FailingTests",
 )
 
+swift_library(
+    name = "CrashingTestsLib",
+    testonly = True,
+    srcs = ["Tests/CrashingTests.swift"],
+    module_name = "CrashingTests",
+)
+
+# Crashes the test host process mid-run. Used to reproduce the companion's
+# terminal-response handling when a host crash is detected.
+ios_unit_test(
+    name = "CrashingTests",
+    size = "medium",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":idb_runner",
+    tags = ["manual"],
+    test_host = ":HostApp",
+    deps = [":CrashingTestsLib"],
+)
+
 # Intentionally failing; used to validate the runner's failure detection.
 ios_unit_test(
     name = "FailingTests",

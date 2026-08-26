@@ -1150,7 +1150,7 @@ to the start of the idb command for phase accounting. A stall is "no output at
 all for stall_seconds"; on stall the idb process is signalled so the runner
 regains control, rather than blocking until the test timeout.
 """
-import json, os, select, signal, sys, time
+import fcntl, json, os, select, signal, sys, time
 
 markers_path, stall_s, pid_path = sys.argv[1], float(sys.argv[2]), sys.argv[3]
 
@@ -1167,6 +1167,13 @@ PHASES = [
 
 start = time.monotonic()
 marks, last_line = {}, start
+
+# Read raw chunks rather than readline(): idb's final record can arrive without
+# a trailing newline, and readline() would then block inside the read waiting
+# for one, bypassing the select() timeout below and defeating stall detection
+# entirely.
+fd = sys.stdin.fileno()
+fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
 
 
 def flush_marks():
@@ -1185,14 +1192,30 @@ def signal_idb(sig):
         return False
 
 
+def note(line):
+    """Record markers for one complete line of idb output."""
+    stripped = line.strip()
+    if stripped.startswith("{"):
+        try:
+            json.loads(stripped)
+            marks["last_test_event"] = round(time.monotonic() - start, 3)
+        except ValueError:
+            pass
+    for needle, name in PHASES:
+        if name not in marks and needle in line:
+            marks[name] = round(time.monotonic() - start, 3)
+
+
 flush_marks()
-stalled = False
+buffer = b""
 while True:
     timeout = None if stall_s <= 0 else max(0.5, stall_s - (time.monotonic() - last_line))
-    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    ready, _, _ = select.select([fd], [], [], timeout)
     if not ready:
         elapsed = time.monotonic() - last_line
         if stall_s > 0 and elapsed >= stall_s:
+            if buffer:
+                note(buffer.decode("utf-8", "replace"))
             recent = max(marks.items(), key=lambda kv: kv[1]) if marks else ("none", 0.0)
             sys.stderr.write(
                 "\nerror: idb produced no output for %.0fs (RULES_IDB_STALL_SECS=%.0f).\n"
@@ -1205,32 +1228,28 @@ while True:
             flush_marks()
             if not signal_idb(signal.SIGTERM):
                 sys.stderr.write("       (could not signal idb; pid file unavailable)\n")
-            stalled = True
-            # Keep draining so idb's own teardown output is not lost.
+            # Stop watching; keep draining so idb's teardown output is not lost.
             stall_s = 0
         continue
-    line = sys.stdin.readline()
-    if not line:
+    try:
+        chunk = os.read(fd, 65536)
+    except BlockingIOError:
+        continue
+    if not chunk:
         break
-    now = time.monotonic()
-    last_line = now
-    sys.stdout.write(line)
-    sys.stdout.flush()
-    # Time of the last structured test event. This is the robust signal: it
-    # does not depend on matching log wording, and the gap between it and the
-    # end of the stream is exactly the time idb spent after the tests stopped
-    # producing results (e.g. waiting for a crash log after a disconnect).
-    stripped = line.strip()
-    if stripped.startswith("{"):
-        try:
-            json.loads(stripped)
-            marks["last_test_event"] = round(now - start, 3)
-        except ValueError:
-            pass
-    for needle, name in PHASES:
-        if name not in marks and needle in line:
-            marks[name] = round(now - start, 3)
+    last_line = time.monotonic()
+    # Pass bytes through verbatim, so the parsed log is byte-identical to what
+    # idb produced (including a missing final newline).
+    sys.stdout.buffer.write(chunk)
+    sys.stdout.buffer.flush()
+    buffer += chunk
+    while b"\n" in buffer:
+        line, buffer = buffer.split(b"\n", 1)
+        note(line.decode("utf-8", "replace"))
     flush_marks()
+
+if buffer:
+    note(buffer.decode("utf-8", "replace"))
 
 marks["stream_end"] = round(time.monotonic() - start, 3)
 flush_marks()
