@@ -138,7 +138,7 @@ Runtime environment overrides: `RULES_IDB_IDB_PATH`,
 `RULES_IDB_SHUTDOWN_SIMULATOR`, `RULES_IDB_COLLECT_LOGS`,
 `RULES_IDB_REPORT_ACTIVITIES`, `RULES_IDB_COLLECT_RESULT_BUNDLE`,
 `RULES_IDB_RECORD_VIDEO`, `RULES_IDB_CRASH_WAIT_SECS`,
-`RULES_IDB_STALL_SECS`, `DEBUG_IDB_TEST_RUNNER`.
+`RULES_IDB_CRASH_GRACE_SECS`, `RULES_IDB_STALL_SECS`, `DEBUG_IDB_TEST_RUNNER`.
 
 ### Diagnosing a hung or disconnected test run
 
@@ -175,9 +175,19 @@ Each run also reports `timing last_test_event_at=… trailing=…`: the gap
 between the final test result and the end of the idb phase. A large trailing
 value is the signature of a post-disconnect wait rather than slow tests.
 
-`RULES_IDB_STALL_SECS` (off by default) fails the run if idb emits nothing at
-all for that many seconds, signalling idb so diagnostics are collected instead
-of waiting out the test timeout.
+**A crashed test host is handled without waiting.** When a test reports
+`crashed`, the host process is gone: XCTest cannot continue in a dead process
+and idb does not relaunch it, so that record is the last result the stream can
+carry. The runner therefore stops waiting shortly afterwards rather than
+sitting until the test timeout — `RULES_IDB_CRASH_GRACE_SECS` controls how
+long, defaulting to 5s, or 60s when result bundles, coverage or logs were
+requested and idb legitimately still has artifacts to assemble. Set it to 0 to
+disable. This turns a multi-minute hang into a failure reported in seconds,
+with the crash recorded as a failing test case.
+
+`RULES_IDB_STALL_SECS` (off by default) is the general case: it fails the run
+if idb emits nothing at all for that many seconds, whether or not a crash was
+reported.
 
 A test-process disconnect that prevents results from being reported is
 represented as a failing test case in the JUnit XML, not only as a non-zero

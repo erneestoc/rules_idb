@@ -33,6 +33,13 @@
 #   RULES_IDB_STALL_SECS      fail fast if idb emits nothing for this many
 #                             seconds, instead of hanging until the test
 #                             timeout with no diagnostics (0/unset = off)
+#   RULES_IDB_CRASH_GRACE_SECS  how long to wait after a test reports that the
+#                             host crashed before concluding idb will never
+#                             return a result. That record is terminal, so the
+#                             only legitimate remaining work is artifact
+#                             collection: defaults to 5s, or 60s when result
+#                             bundles, coverage or logs were requested. 0
+#                             disables the check
 #   DEBUG_IDB_TEST_RUNNER     set -x tracing
 #
 # On any non-zero exit the runner preserves companion stderr, raw idb client
@@ -1143,7 +1150,7 @@ readonly stream_monitor="$test_tmp_dir/idb_stream_monitor.py"
 cat > "$stream_monitor" <<'PYEOF'
 """Copy stdin to stdout, recording when idb reaches notable phases.
 
-argv: <markers.json> <stall_seconds|0> <idb_pid_file>
+argv: <markers.json> <stall_seconds|0> <idb_pid_file> [crash_grace_seconds|0]
 
 Markers are seconds elapsed since this process started, which is close enough
 to the start of the idb command for phase accounting. A stall is "no output at
@@ -1153,6 +1160,14 @@ regains control, rather than blocking until the test timeout.
 import fcntl, json, os, select, signal, sys, time
 
 markers_path, stall_s, pid_path = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+# Once a test reports `crashed`, the test host is gone: XCTest cannot continue
+# in a dead process and idb does not relaunch it mid-run, so that record is the
+# last result the stream will ever carry. Waiting out a generic stall timeout
+# after it is pure dead time. The grace only covers idb's own finalisation
+# (result bundle, coverage, log collection) before we conclude it is stuck.
+crash_grace_s = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0
+crash_seen_at = None
+kill_deadline = None
 
 # Substring -> marker name. First occurrence of each wins.
 PHASES = [
@@ -1194,11 +1209,15 @@ def signal_idb(sig):
 
 def note(line):
     """Record markers for one complete line of idb output."""
+    global crash_seen_at
     stripped = line.strip()
     if stripped.startswith("{"):
         try:
-            json.loads(stripped)
+            record = json.loads(stripped)
             marks["last_test_event"] = round(time.monotonic() - start, 3)
+            if record.get("crashed") and crash_seen_at is None:
+                crash_seen_at = time.monotonic()
+                marks["test_host_crashed"] = round(crash_seen_at - start, 3)
         except ValueError:
             pass
     for needle, name in PHASES:
@@ -1209,10 +1228,49 @@ def note(line):
 flush_marks()
 buffer = b""
 while True:
-    timeout = None if stall_s <= 0 else max(0.5, stall_s - (time.monotonic() - last_line))
+    now = time.monotonic()
+    deadlines = []
+    if stall_s > 0:
+        deadlines.append(stall_s - (now - last_line))
+    if crash_grace_s > 0 and crash_seen_at is not None:
+        deadlines.append(crash_grace_s - (now - crash_seen_at))
+    if kill_deadline is not None:
+        deadlines.append(kill_deadline - now)
+    timeout = None if not deadlines else max(0.25, min(deadlines))
     ready, _, _ = select.select([fd], [], [], timeout)
     if not ready:
-        elapsed = time.monotonic() - last_line
+        now = time.monotonic()
+        if kill_deadline is not None and now >= kill_deadline:
+            sys.stderr.write("       idb did not exit on SIGTERM; sending SIGKILL.\n")
+            sys.stderr.flush()
+            signal_idb(signal.SIGKILL)
+            kill_deadline = None
+            continue
+        # The test host crashed and idb has not finished within the grace: it
+        # is not going to. Terminate rather than wait out the test timeout.
+        if crash_grace_s > 0 and crash_seen_at is not None \
+                and now - crash_seen_at >= crash_grace_s:
+            if buffer:
+                note(buffer.decode("utf-8", "replace"))
+            sys.stderr.write(
+                "\nerror: the test host crashed %.0fs ago and idb has still not "
+                "returned a result.\n"
+                "       Nothing further can arrive: XCTest cannot continue in a "
+                "crashed process.\n"
+                "       Terminating idb so the failure is reported now rather than "
+                "at the test timeout.\n"
+                "       (grace period: RULES_IDB_CRASH_GRACE_SECS=%.0f)\n"
+                % (now - crash_seen_at, crash_grace_s)
+            )
+            sys.stderr.flush()
+            marks["crash_grace_expired_after"] = round(now - crash_seen_at, 3)
+            flush_marks()
+            signal_idb(signal.SIGTERM)
+            # Escalate if it does not go away: the point of this path is that
+            # the pipeline must close, so never fall back to waiting forever.
+            crash_grace_s, stall_s, kill_deadline = 0, 0, time.monotonic() + 10
+            continue
+        elapsed = now - last_line
         if stall_s > 0 and elapsed >= stall_s:
             if buffer:
                 note(buffer.decode("utf-8", "replace"))
@@ -1229,7 +1287,7 @@ while True:
             if not signal_idb(signal.SIGTERM):
                 sys.stderr.write("       (could not signal idb; pid file unavailable)\n")
             # Stop watching; keep draining so idb's teardown output is not lost.
-            stall_s = 0
+            stall_s, kill_deadline = 0, time.monotonic() + 10
         continue
     try:
         chunk = os.read(fd, 65536)
@@ -1246,6 +1304,11 @@ while True:
     while b"\n" in buffer:
         line, buffer = buffer.split(b"\n", 1)
         note(line.decode("utf-8", "replace"))
+    # idb's final record often arrives without a trailing newline, so also look
+    # at whatever is still buffered. note() ignores anything that is not yet
+    # complete JSON, and re-examining the same bytes is harmless.
+    if buffer:
+        note(buffer.decode("utf-8", "replace"))
     flush_marks()
 
 if buffer:
@@ -1334,6 +1397,20 @@ fi
 # The idb client exits 0 even when test cases fail (it only exits non-zero
 # for infrastructure errors or crashes outside of test cases), so the log is
 # the source of truth for pass/fail.
+# How long to keep waiting after a test reports that the host process crashed.
+# That record is terminal -- XCTest cannot continue in a dead process -- so the
+# only legitimate reason for idb to still be working is assembling the
+# artifacts it was asked for. Give it room when they were requested, and very
+# little when they were not. 0 disables the check entirely.
+if [[ -n "${RULES_IDB_CRASH_GRACE_SECS:-}" ]]; then
+  crash_grace_secs="$RULES_IDB_CRASH_GRACE_SECS"
+elif [[ "$collect_coverage" == true || -n "${RULES_IDB_COLLECT_RESULT_BUNDLE:-}" \
+     || -n "${RULES_IDB_COLLECT_LOGS:-}" ]]; then
+  crash_grace_secs=60
+else
+  crash_grace_secs=5
+fi
+
 run_idb_once() {
   test_exit_code=0
   idb_start_ms=$(now_ms)
@@ -1344,7 +1421,8 @@ run_idb_once() {
   # below) and the console output are unchanged.
   { "${idb_cmd[@]}" 2>&1 200>&- & idb_child=$!; echo "$idb_child" > "$idb_pid_file"; wait "$idb_child"; } \
     | tee -i "$testlog" \
-    | "$python_bin" "$stream_monitor" "$markers_file" "${RULES_IDB_STALL_SECS:-0}" "$idb_pid_file" \
+    | "$python_bin" "$stream_monitor" "$markers_file" "${RULES_IDB_STALL_SECS:-0}" \
+        "$idb_pid_file" "$crash_grace_secs" \
     || test_exit_code=$?
   stop_recording
   idb_ms=$(( $(now_ms) - idb_start_ms ))
