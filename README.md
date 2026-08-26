@@ -137,7 +137,53 @@ Runtime environment overrides: `RULES_IDB_IDB_PATH`,
 `RULES_IDB_COMPANION_PATH`, `RULES_IDB_POOL_DIR`, `RULES_IDB_POOL_SIZE`,
 `RULES_IDB_SHUTDOWN_SIMULATOR`, `RULES_IDB_COLLECT_LOGS`,
 `RULES_IDB_REPORT_ACTIVITIES`, `RULES_IDB_COLLECT_RESULT_BUNDLE`,
-`RULES_IDB_RECORD_VIDEO`, `DEBUG_IDB_TEST_RUNNER`.
+`RULES_IDB_RECORD_VIDEO`, `RULES_IDB_CRASH_WAIT_SECS`,
+`RULES_IDB_STALL_SECS`, `DEBUG_IDB_TEST_RUNNER`.
+
+### Diagnosing a hung or disconnected test run
+
+When the test process disconnects, idb waits for a crash report matching the
+test host's pid before reporting `Lost connection to test process, but could
+not find a crash log`. That wait defaults to **120 seconds**
+(`crashCheckWaitLimit`, `XCTestBootstrap/TestManager/FBTestBundleConnection.swift`)
+and the event stream is silent throughout, so it looks like a hang. It also
+cannot succeed at all when crash reports are unreadable from the test action
+(a sandbox, or a per-action `$HOME`) or when the host was killed for memory,
+since that writes a `JetsamEvent-*.ips` report rather than a pid-matching
+crash log.
+
+`RULES_IDB_CRASH_WAIT_SECS` bounds it. The value is exported to the companion
+as `FBXCTEST_CRASH_WAIT_TIMEOUT`; XCTestBootstrap runs inside the companion,
+so `--test_env` alone does not reach it.
+
+On any non-zero exit the runner writes to
+`$TEST_UNDECLARED_OUTPUTS_DIR/idb_diagnostics/`:
+
+| File | Contents |
+|---|---|
+| `companion.log` | the per-action `idb_companion` stderr |
+| `idb_client.log` | raw idb client output, including transport errors |
+| `phase_markers.json` | timestamps for stream phases and the last test event |
+| `diagnosis.txt` | timings, simulator UDID, pool slot, pids, the idb command, every crash-report path checked and whether it was readable, and any recent `JetsamEvent` reports |
+
+Unlike `RULES_IDB_COLLECT_LOGS` (which asks the idb *client* to write its logs
+at the end of a completed run, and so produces nothing when a run is cut
+short), these are captured however the run ended, including the
+timeout/SIGTERM path.
+
+Each run also reports `timing last_test_event_at=… trailing=…`: the gap
+between the final test result and the end of the idb phase. A large trailing
+value is the signature of a post-disconnect wait rather than slow tests.
+
+`RULES_IDB_STALL_SECS` (off by default) fails the run if idb emits nothing at
+all for that many seconds, signalling idb so diagnostics are collected instead
+of waiting out the test timeout.
+
+A test-process disconnect that prevents results from being reported is
+represented as a failing test case in the JUnit XML, not only as a non-zero
+runner exit: tests that never ran are named individually when the expected set
+is known (sharding or `--test_filter`), and otherwise a single
+`idb_test_process_disconnected` case is emitted.
 
 ### Test attachments
 

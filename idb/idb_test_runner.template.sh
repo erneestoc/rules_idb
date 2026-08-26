@@ -23,7 +23,21 @@
 #                             undeclared outputs: "always" keeps every run,
 #                             "on-failure" (default for any other value) keeps
 #                             it only when the test fails
+#   RULES_IDB_CRASH_WAIT_SECS  bound idb's post-disconnect crash-log wait
+#                             (exported to the companion as
+#                             FBXCTEST_CRASH_WAIT_TIMEOUT; idb defaults to
+#                             120s, spent silently after a test-process
+#                             disconnect, and it cannot succeed at all when
+#                             crash reports are unreadable or the host was
+#                             jetsam-killed)
+#   RULES_IDB_STALL_SECS      fail fast if idb emits nothing for this many
+#                             seconds, instead of hanging until the test
+#                             timeout with no diagnostics (0/unset = off)
 #   DEBUG_IDB_TEST_RUNNER     set -x tracing
+#
+# On any non-zero exit the runner preserves companion stderr, raw idb client
+# output, phase markers and a crash-lookup diagnosis into
+# $TEST_UNDECLARED_OUTPUTS_DIR/idb_diagnostics.
 
 set -euo pipefail
 
@@ -239,8 +253,89 @@ fi
 test_tmp_dir="$(mktemp -d "${TEST_TMPDIR:-${TMPDIR:-/tmp}}/idb_test_runner.XXXXXX")"
 companion_pid=""
 companion_sock_dir=""
+# Preserve everything needed to diagnose a failed or hung run into undeclared
+# outputs. The idb client's own --log-directory-path logs (RULES_IDB_COLLECT_LOGS)
+# are written at the end of a *completed* run, so a test-process disconnect --
+# the case that most needs diagnosing -- leaves that directory empty. These
+# files exist regardless of how the run ended.
+#
+# Called from cleanup(), so it also runs on the SIGTERM/timeout path.
+preserve_diagnostics() {
+  local reason="$1"
+  [[ -n "${TEST_UNDECLARED_OUTPUTS_DIR:-}" ]] || return 0
+  local out="$TEST_UNDECLARED_OUTPUTS_DIR/idb_diagnostics"
+  mkdir -p "$out" 2>/dev/null || return 0
+
+  [[ -f "${companion_log:-}" ]] && cp -f "$companion_log" "$out/companion.log" 2>/dev/null
+  [[ -f "${testlog:-}" ]] && cp -f "$testlog" "$out/idb_client.log" 2>/dev/null
+  [[ -f "${markers_file:-}" ]] && cp -f "$markers_file" "$out/phase_markers.json" 2>/dev/null
+
+  {
+    echo "reason: $reason"
+    echo "simulator_udid: ${simulator_id:-<none>}"
+    echo "pool_slot: ${acquired_slot:-<none>}"
+    echo "companion_pid: ${companion_pid:-<none>}"
+    echo "idb_exit_code: ${idb_exit_code:-<unset>}"
+    echo "parse_exit_code: ${parse_exit_code:-<unset>}"
+    echo "test_bundle_id: ${test_bundle_id:-<none>}"
+    echo
+    echo "phase timings (ms):"
+    echo "  stage=${stage_ms:-?} simulator=${simulator_ms:-?} companion=${companion_ms:-?} idb=${idb_ms:-?}"
+    if [[ -f "${markers_file:-}" ]]; then
+      echo
+      echo "stream markers (seconds from start of the idb command):"
+      sed 's/^/  /' "$markers_file"
+    fi
+    echo
+    echo "idb command:"
+    printf '  %q' "${idb_cmd[@]:-}" 2>/dev/null; echo
+    echo
+    echo "crash-log lookup:"
+    # idb waits up to FBXCTEST_CRASH_WAIT_TIMEOUT (default 120s, see
+    # XCTestBootstrap/TestManager/FBTestBundleConnection.swift) for a crash
+    # report matching the test host's pid. Record whether such reports are
+    # even reachable from here: under a sandbox or a per-action $HOME they may
+    # not be, in which case that wait can never succeed.
+    local dr
+    for dr in "${real_home:-$HOME}/Library/Logs/DiagnosticReports" \
+              "/Library/Logs/DiagnosticReports"; do
+      if [[ -d "$dr" ]]; then
+        if [[ -r "$dr" ]]; then
+          echo "  readable: $dr ($(ls -1 "$dr" 2>/dev/null | wc -l | tr -d ' ') entries)"
+          ls -1t "$dr" 2>/dev/null | head -20 | sed 's/^/    /'
+        else
+          echo "  NOT READABLE: $dr  <- crash-log lookup cannot succeed"
+        fi
+      else
+        echo "  missing: $dr"
+      fi
+    done
+    # A jetsam (memory) kill does not produce a crash report matching the pid
+    # predicate idb searches, so it looks exactly like "no crash log".
+    local jetsam
+    jetsam=$(ls -1t "${real_home:-$HOME}/Library/Logs/DiagnosticReports"/JetsamEvent-* \
+             /Library/Logs/DiagnosticReports/JetsamEvent-* 2>/dev/null | head -5 || true)
+    if [[ -n "$jetsam" ]]; then
+      echo "  recent JetsamEvent reports (memory kills produce these INSTEAD of a crash log):"
+      printf '%s\n' "$jetsam" | sed 's/^/    /'
+    else
+      echo "  no JetsamEvent reports found"
+    fi
+    echo
+    echo "crash wait: FBXCTEST_CRASH_WAIT_TIMEOUT=${RULES_IDB_CRASH_WAIT_SECS:-<unset, idb default 120s>}"
+  } > "$out/diagnosis.txt" 2>/dev/null || true
+
+  echo "note: wrote idb diagnostics to \$TEST_UNDECLARED_OUTPUTS_DIR/idb_diagnostics ($reason)" >&2
+}
+
 cleanup() {
   local cleanup_exit_code=$?
+  # Preserve diagnostics before anything is torn down or deleted. Any non-zero
+  # exit qualifies, including the SIGTERM/timeout path where the interesting
+  # evidence would otherwise die with $test_tmp_dir.
+  if [[ "$cleanup_exit_code" -ne 0 ]]; then
+    preserve_diagnostics "runner exited $cleanup_exit_code" || true
+  fi
   # Stop any in-flight screen recorder (guarded: it may not be declared yet on
   # a very early failure, and set -u is in effect).
   if [[ -n "${recorder_pid:-}" ]]; then
@@ -824,7 +919,19 @@ stop_recording() {
 spawn_companion() {
   companion_start_ms=$(now_ms)
   rm -f "$companion_sock"
-  "$companion_bin" --udid "$simulator_id" --grpc-domain-sock "$companion_sock" >> "$companion_log" 2>&1 200>&- 201>&- &
+  # XCTestBootstrap runs inside the companion, so its knobs must be set on the
+  # companion's environment -- --test_env does not reach it. The default
+  # crash-log wait is 120s (crashCheckWaitLimit in FBTestBundleConnection.swift),
+  # spent *after* a test-process disconnect, during which nothing is emitted.
+  # It can never succeed if crash reports are unreadable (sandbox, per-action
+  # $HOME) or if the host was jetsam-killed, since that writes a JetsamEvent
+  # report rather than a pid-matching crash log.
+  local -a companion_env=()
+  if [[ -n "${RULES_IDB_CRASH_WAIT_SECS:-}" ]]; then
+    companion_env+=("FBXCTEST_CRASH_WAIT_TIMEOUT=$RULES_IDB_CRASH_WAIT_SECS")
+  fi
+  env ${companion_env[@]+"${companion_env[@]}"} \
+    "$companion_bin" --udid "$simulator_id" --grpc-domain-sock "$companion_sock" >> "$companion_log" 2>&1 200>&- 201>&- &
   companion_pid=$!
 
   companion_ready=false
@@ -1024,6 +1131,113 @@ fi
 # Run the tests through idb.
 # ---------------------------------------------------------------------------
 readonly testlog="$test_tmp_dir/test.log"
+readonly markers_file="$test_tmp_dir/phase_markers.json"
+readonly idb_pid_file="$test_tmp_dir/idb.pid"
+
+# Pass-through monitor for idb's output stream. It timestamps the phase
+# transitions idb reports (so time spent after a test-process disconnect is
+# visible rather than hidden inside one opaque "idb" bucket) and, when
+# RULES_IDB_STALL_SECS is set, fails fast on a silent stream instead of
+# waiting for Bazel's timeout with no diagnostics.
+readonly stream_monitor="$test_tmp_dir/idb_stream_monitor.py"
+cat > "$stream_monitor" <<'PYEOF'
+"""Copy stdin to stdout, recording when idb reaches notable phases.
+
+argv: <markers.json> <stall_seconds|0> <idb_pid_file>
+
+Markers are seconds elapsed since this process started, which is close enough
+to the start of the idb command for phase accounting. A stall is "no output at
+all for stall_seconds"; on stall the idb process is signalled so the runner
+regains control, rather than blocking until the test timeout.
+"""
+import json, os, select, signal, sys, time
+
+markers_path, stall_s, pid_path = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+
+# Substring -> marker name. First occurrence of each wins.
+PHASES = [
+    ("Connecting Test Bundle", "bundle_connecting"),
+    ("Bundle Ready", "bundle_ready"),
+    ("Bundle disconnected, with the test plan completed", "completed"),
+    ("Bundle disconnected, but test plan has not completed", "disconnect"),
+    ("Lost connection to test process", "disconnect"),
+    ("could not find a crash log", "crash_lookup_failed"),
+    ("The host application is likely to have crashed", "host_crashed_at_startup"),
+]
+
+start = time.monotonic()
+marks, last_line = {}, start
+
+
+def flush_marks():
+    tmp = markers_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(marks, f, indent=2, sort_keys=True)
+    os.replace(tmp, markers_path)
+
+
+def signal_idb(sig):
+    try:
+        with open(pid_path) as f:
+            os.kill(int(f.read().strip()), sig)
+        return True
+    except Exception:
+        return False
+
+
+flush_marks()
+stalled = False
+while True:
+    timeout = None if stall_s <= 0 else max(0.5, stall_s - (time.monotonic() - last_line))
+    ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    if not ready:
+        elapsed = time.monotonic() - last_line
+        if stall_s > 0 and elapsed >= stall_s:
+            recent = max(marks.items(), key=lambda kv: kv[1]) if marks else ("none", 0.0)
+            sys.stderr.write(
+                "\nerror: idb produced no output for %.0fs (RULES_IDB_STALL_SECS=%.0f).\n"
+                "       last phase reached: %s at %.1fs\n"
+                "       signalling the idb process so diagnostics can be collected.\n"
+                % (elapsed, stall_s, recent[0], recent[1])
+            )
+            sys.stderr.flush()
+            marks["stalled_after"] = round(elapsed, 3)
+            flush_marks()
+            if not signal_idb(signal.SIGTERM):
+                sys.stderr.write("       (could not signal idb; pid file unavailable)\n")
+            stalled = True
+            # Keep draining so idb's own teardown output is not lost.
+            stall_s = 0
+        continue
+    line = sys.stdin.readline()
+    if not line:
+        break
+    now = time.monotonic()
+    last_line = now
+    sys.stdout.write(line)
+    sys.stdout.flush()
+    # Time of the last structured test event. This is the robust signal: it
+    # does not depend on matching log wording, and the gap between it and the
+    # end of the stream is exactly the time idb spent after the tests stopped
+    # producing results (e.g. waiting for a crash log after a disconnect).
+    stripped = line.strip()
+    if stripped.startswith("{"):
+        try:
+            json.loads(stripped)
+            marks["last_test_event"] = round(now - start, 3)
+        except ValueError:
+            pass
+    for needle, name in PHASES:
+        if name not in marks and needle in line:
+            marks[name] = round(now - start, 3)
+    flush_marks()
+
+marks["stream_end"] = round(time.monotonic() - start, 3)
+flush_marks()
+# Exit 0 so the pipeline reports idb's own status (pipefail takes the leftmost
+# failure); a stall is surfaced through the marker file and idb's exit code.
+sys.exit(0)
+PYEOF
 test_exit_code=0
 
 # Global options must precede the subcommand, and option flags must precede
@@ -1105,17 +1319,62 @@ run_idb_once() {
   test_exit_code=0
   idb_start_ms=$(now_ms)
   start_recording
-  "${idb_cmd[@]}" 2>&1 200>&- | tee -i "$testlog" || test_exit_code=$?
+  rm -f "$markers_file" "$idb_pid_file"
+  # idb runs as a named child so the monitor can signal it on a stall; the
+  # monitor passes every line through untouched, so `tee`'s file (parsed
+  # below) and the console output are unchanged.
+  { "${idb_cmd[@]}" 2>&1 200>&- & idb_child=$!; echo "$idb_child" > "$idb_pid_file"; wait "$idb_child"; } \
+    | tee -i "$testlog" \
+    | "$python_bin" "$stream_monitor" "$markers_file" "${RULES_IDB_STALL_SECS:-0}" "$idb_pid_file" \
+    || test_exit_code=$?
   stop_recording
   idb_ms=$(( $(now_ms) - idb_start_ms ))
   idb_exit_code=$test_exit_code
 
-  parse_exit_code=0
-  "$python_bin" - "$testlog" "${XML_OUTPUT_FILE:-}" "$test_bundle_name" <<'PYEOF' || parse_exit_code=$?
+  # Surface the post-disconnect period explicitly: a test-process disconnect
+  # sends idb into a crash-log wait (default 120s) during which the event
+  # stream is completely silent, which otherwise just looks like a hang.
+  if [[ -f "$markers_file" ]]; then
+    "$python_bin" - "$markers_file" "$idb_ms" <<'PYEOF' >&2 || true
 import json, sys
+try:
+    marks = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+idb_s = int(sys.argv[2]) / 1000.0
+disc = marks.get("disconnect")
+last = marks.get("last_test_event")
+at, label = (disc, "disconnect_at") if disc is not None else (last, "last_test_event_at")
+if at is None:
+    sys.exit(0)
+trailing = idb_s - at
+print("note: timing %s=%.3fs trailing=%.3fs (idb total %.3fs)"
+      % (label, at, trailing, idb_s))
+# Only editorialise when the trailing gap is large enough to matter; a couple
+# of seconds is ordinary teardown.
+if trailing >= 20:
+    print("note: idb spent %.0fs after the last test result." % trailing)
+    if disc is not None:
+        print("      The test process disconnected. idb then waits up to")
+    else:
+        print("      No further test results arrived. If the test process disconnected,")
+        print("      idb waits up to")
+    print("      FBXCTEST_CRASH_WAIT_TIMEOUT (default 120s) for a crash report matching")
+    print("      the test host pid; that wait cannot succeed if crash reports are")
+    print("      unreadable here or the host was jetsam-killed. Bound it with")
+    print("      RULES_IDB_CRASH_WAIT_SECS; see $TEST_UNDECLARED_OUTPUTS_DIR/idb_diagnostics.")
+PYEOF
+  fi
+
+  parse_exit_code=0
+  "$python_bin" - "$testlog" "${XML_OUTPUT_FILE:-}" "$test_bundle_name" \
+    "$idb_exit_code" "$test_tmp_dir/shard_tests.txt" <<'PYEOF' || parse_exit_code=$?
+import json, os, sys
 from xml.sax.saxutils import escape
 
 testlog, xml_output_file, bundle_name = sys.argv[1], sys.argv[2], sys.argv[3]
+idb_exit_code = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else 0
+expected_path = sys.argv[5] if len(sys.argv) > 5 else ""
 
 records = []
 with open(testlog, "r", errors="replace") as f:
@@ -1135,6 +1394,40 @@ failures = [r for r in records if not r.get("passed", False)]
 
 if xml_output_file:
     cases = []
+    # Reconcile what idb was asked to run against what it reported. The
+    # expected list is only known when sharding/filtering produced one.
+    expected = []
+    if expected_path and os.path.exists(expected_path):
+        with open(expected_path) as f:
+            expected = [l.strip() for l in f if l.strip()]
+    ran = {"%s/%s" % (r.get("className"), r.get("methodName")) for r in records}
+    missing = [e for e in expected
+               if e not in ran and e.split(".", 1)[-1] not in ran]
+
+    synthetic = []
+    if missing:
+        for m in missing[:50]:
+            synthetic.append((
+                m.replace("/", "."),
+                "test never ran: the test process disconnected before it "
+                "completed (idb exited %d). See "
+                "$TEST_UNDECLARED_OUTPUTS_DIR/idb_diagnostics." % idb_exit_code,
+            ))
+        if len(missing) > 50:
+            synthetic.append((
+                "%d_further_tests_did_not_run" % (len(missing) - 50),
+                "%d further tests never ran after the disconnect." % (len(missing) - 50),
+            ))
+    elif idb_exit_code != 0 and not failures:
+        # idb failed but every reported test passed: the failure is real and
+        # belongs somewhere visible rather than only in the runner exit code.
+        synthetic.append((
+            "idb_test_process_disconnected",
+            "idb exited %d after %d passing tests without reporting a failing "
+            "test. The test process most likely disconnected or crashed. See "
+            "$TEST_UNDECLARED_OUTPUTS_DIR/idb_diagnostics." % (idb_exit_code, executed),
+        ))
+
     for r in records:
         name = escape(r.get("methodName", "unknown"), {'"': "&quot;"})
         classname = escape(r.get("className", bundle_name), {'"': "&quot;"})
@@ -1155,12 +1448,27 @@ if xml_output_file:
             '    <testcase name="%s" classname="%s" time="%.3f">%s</testcase>'
             % (name, classname, duration, body + ("\n    " if body else ""))
         )
+    # A test-process disconnect can end the run with tests that simply never
+    # executed. They are absent from the stream entirely, so without this the
+    # suite reports only the tests that did run and the ones that were lost
+    # are invisible -- and if none of the executed tests failed, the target
+    # can even pass. Represent the loss as a real failing test case.
+    if synthetic:
+        for sname, smsg in synthetic:
+            cases.append(
+                '    <testcase name="%s" classname="%s" time="0.000">\n'
+                '      <error message="%s"></error>\n    </testcase>'
+                % (escape(sname, {'"': "&quot;"}),
+                   escape(bundle_name, {'"': "&quot;"}),
+                   escape(smsg, {'"': "&quot;"}))
+            )
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<testsuites>\n'
         '  <testsuite name="%s" tests="%d" failures="%d">\n%s\n  </testsuite>\n'
         '</testsuites>\n'
-    ) % (escape(bundle_name), executed, len(failures), "\n".join(cases))
+    ) % (escape(bundle_name), executed + len(synthetic),
+         len(failures) + len(synthetic), "\n".join(cases))
     with open(xml_output_file, "w") as f:
         f.write(xml)
 
@@ -1179,7 +1487,7 @@ for r in failures:
         file=sys.stderr,
     )
 
-if failures:
+if failures or synthetic:
     sys.exit(70)
 if executed == 0:
     sys.exit(71)
