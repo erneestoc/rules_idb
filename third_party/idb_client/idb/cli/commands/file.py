@@ -4,7 +4,6 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 import json
 import os
@@ -12,7 +11,6 @@ import sys
 import tempfile
 from abc import abstractmethod
 from argparse import _MutuallyExclusiveGroup, ArgumentParser, Namespace
-from typing import List, Tuple
 
 import aiofiles
 from idb.cli import ClientCommand
@@ -101,7 +99,7 @@ class FSCommand(ClientCommand):
         bundle_id = args.bundle_id
         if bundle_id is not None:
             container = bundle_id
-            self.logger.warn(
+            self.logger.warning(
                 f"'--bundle-id {bundle_id}' is deprecated, please use --application prefixing '{bundle_id}' in the file path/s provided to this command."
             )
         else:

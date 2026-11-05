@@ -27,15 +27,15 @@ class CompanionServiceBase(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def forward_port(self, stream: 'grpclib.server.Stream[idb_pb2.ForwardPortRequest, idb_pb2.ForwardPortResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
     async def describe(self, stream: 'grpclib.server.Stream[idb_pb2.TargetDescriptionRequest, idb_pb2.TargetDescriptionResponse]') -> None:
         pass
 
     @abc.abstractmethod
     async def install(self, stream: 'grpclib.server.Stream[idb_pb2.InstallRequest, idb_pb2.InstallResponse]') -> None:
-        pass
-
-    @abc.abstractmethod
-    async def instruments_run(self, stream: 'grpclib.server.Stream[idb_pb2.InstrumentsRunRequest, idb_pb2.InstrumentsRunResponse]') -> None:
         pass
 
     @abc.abstractmethod
@@ -47,6 +47,10 @@ class CompanionServiceBase(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def profile(self, stream: 'grpclib.server.Stream[idb_pb2.ProfileRequest, idb_pb2.ProfileResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
     async def accessibility_info(self, stream: 'grpclib.server.Stream[idb_pb2.AccessibilityInfoRequest, idb_pb2.AccessibilityInfoResponse]') -> None:
         pass
 
@@ -55,7 +59,23 @@ class CompanionServiceBase(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def accessibility_quiescence(self, stream: 'grpclib.server.Stream[idb_pb2.AccessibilityQuiescenceRequest, idb_pb2.AccessibilityQuiescenceResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
     async def focus(self, stream: 'grpclib.server.Stream[idb_pb2.FocusRequest, idb_pb2.FocusResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
+    async def get_orientation(self, stream: 'grpclib.server.Stream[idb_pb2.GetOrientationRequest, idb_pb2.GetOrientationResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
+    async def set_orientation(self, stream: 'grpclib.server.Stream[idb_pb2.SetOrientationRequest, idb_pb2.SetOrientationResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
+    async def hinge_angle(self, stream: 'grpclib.server.Stream[idb_pb2.HingeAngleRequest, idb_pb2.HingeAngleResponse]') -> None:
         pass
 
     @abc.abstractmethod
@@ -72,6 +92,14 @@ class CompanionServiceBase(abc.ABC):
 
     @abc.abstractmethod
     async def send_notification(self, stream: 'grpclib.server.Stream[idb_pb2.SendNotificationRequest, idb_pb2.SendNotificationResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
+    async def delivered_notifications(self, stream: 'grpclib.server.Stream[idb_pb2.DeliveredNotificationsRequest, idb_pb2.DeliveredNotificationsResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
+    async def clear_delivered_notifications(self, stream: 'grpclib.server.Stream[idb_pb2.ClearDeliveredNotificationsRequest, idb_pb2.ClearDeliveredNotificationsResponse]') -> None:
         pass
 
     @abc.abstractmethod
@@ -100,6 +128,10 @@ class CompanionServiceBase(abc.ABC):
 
     @abc.abstractmethod
     async def photos_clear(self, stream: 'grpclib.server.Stream[idb_pb2.PhotosClearRequest, idb_pb2.PhotosClearResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
+    async def lock_screen(self, stream: 'grpclib.server.Stream[idb_pb2.LockScreenRequest, idb_pb2.LockScreenResponse]') -> None:
         pass
 
     @abc.abstractmethod
@@ -132,6 +164,14 @@ class CompanionServiceBase(abc.ABC):
 
     @abc.abstractmethod
     async def add_media(self, stream: 'grpclib.server.Stream[idb_pb2.AddMediaRequest, idb_pb2.AddMediaResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
+    async def inject_audio(self, stream: 'grpclib.server.Stream[idb_pb2.InjectAudioRequest, idb_pb2.InjectAudioResponse]') -> None:
+        pass
+
+    @abc.abstractmethod
+    async def inject_video(self, stream: 'grpclib.server.Stream[idb_pb2.InjectVideoRequest, idb_pb2.InjectVideoResponse]') -> None:
         pass
 
     @abc.abstractmethod
@@ -222,6 +262,12 @@ class CompanionServiceBase(abc.ABC):
                 idb_pb2.DapRequest,
                 idb_pb2.DapResponse,
             ),
+            '/idb.CompanionService/forward_port': grpclib.const.Handler(
+                self.forward_port,
+                grpclib.const.Cardinality.STREAM_STREAM,
+                idb_pb2.ForwardPortRequest,
+                idb_pb2.ForwardPortResponse,
+            ),
             '/idb.CompanionService/describe': grpclib.const.Handler(
                 self.describe,
                 grpclib.const.Cardinality.UNARY_UNARY,
@@ -233,12 +279,6 @@ class CompanionServiceBase(abc.ABC):
                 grpclib.const.Cardinality.STREAM_STREAM,
                 idb_pb2.InstallRequest,
                 idb_pb2.InstallResponse,
-            ),
-            '/idb.CompanionService/instruments_run': grpclib.const.Handler(
-                self.instruments_run,
-                grpclib.const.Cardinality.STREAM_STREAM,
-                idb_pb2.InstrumentsRunRequest,
-                idb_pb2.InstrumentsRunResponse,
             ),
             '/idb.CompanionService/log': grpclib.const.Handler(
                 self.log,
@@ -252,6 +292,12 @@ class CompanionServiceBase(abc.ABC):
                 idb_pb2.XctraceRecordRequest,
                 idb_pb2.XctraceRecordResponse,
             ),
+            '/idb.CompanionService/profile': grpclib.const.Handler(
+                self.profile,
+                grpclib.const.Cardinality.STREAM_STREAM,
+                idb_pb2.ProfileRequest,
+                idb_pb2.ProfileResponse,
+            ),
             '/idb.CompanionService/accessibility_info': grpclib.const.Handler(
                 self.accessibility_info,
                 grpclib.const.Cardinality.UNARY_UNARY,
@@ -264,11 +310,35 @@ class CompanionServiceBase(abc.ABC):
                 idb_pb2.AccessibilityActionRequest,
                 idb_pb2.AccessibilityActionResponse,
             ),
+            '/idb.CompanionService/accessibility_quiescence': grpclib.const.Handler(
+                self.accessibility_quiescence,
+                grpclib.const.Cardinality.UNARY_STREAM,
+                idb_pb2.AccessibilityQuiescenceRequest,
+                idb_pb2.AccessibilityQuiescenceResponse,
+            ),
             '/idb.CompanionService/focus': grpclib.const.Handler(
                 self.focus,
                 grpclib.const.Cardinality.UNARY_UNARY,
                 idb_pb2.FocusRequest,
                 idb_pb2.FocusResponse,
+            ),
+            '/idb.CompanionService/get_orientation': grpclib.const.Handler(
+                self.get_orientation,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                idb_pb2.GetOrientationRequest,
+                idb_pb2.GetOrientationResponse,
+            ),
+            '/idb.CompanionService/set_orientation': grpclib.const.Handler(
+                self.set_orientation,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                idb_pb2.SetOrientationRequest,
+                idb_pb2.SetOrientationResponse,
+            ),
+            '/idb.CompanionService/hinge_angle': grpclib.const.Handler(
+                self.hinge_angle,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                idb_pb2.HingeAngleRequest,
+                idb_pb2.HingeAngleResponse,
             ),
             '/idb.CompanionService/hid': grpclib.const.Handler(
                 self.hid,
@@ -293,6 +363,18 @@ class CompanionServiceBase(abc.ABC):
                 grpclib.const.Cardinality.UNARY_UNARY,
                 idb_pb2.SendNotificationRequest,
                 idb_pb2.SendNotificationResponse,
+            ),
+            '/idb.CompanionService/delivered_notifications': grpclib.const.Handler(
+                self.delivered_notifications,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                idb_pb2.DeliveredNotificationsRequest,
+                idb_pb2.DeliveredNotificationsResponse,
+            ),
+            '/idb.CompanionService/clear_delivered_notifications': grpclib.const.Handler(
+                self.clear_delivered_notifications,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                idb_pb2.ClearDeliveredNotificationsRequest,
+                idb_pb2.ClearDeliveredNotificationsResponse,
             ),
             '/idb.CompanionService/simulate_memory_warning': grpclib.const.Handler(
                 self.simulate_memory_warning,
@@ -335,6 +417,12 @@ class CompanionServiceBase(abc.ABC):
                 grpclib.const.Cardinality.UNARY_UNARY,
                 idb_pb2.PhotosClearRequest,
                 idb_pb2.PhotosClearResponse,
+            ),
+            '/idb.CompanionService/lock_screen': grpclib.const.Handler(
+                self.lock_screen,
+                grpclib.const.Cardinality.UNARY_UNARY,
+                idb_pb2.LockScreenRequest,
+                idb_pb2.LockScreenResponse,
             ),
             '/idb.CompanionService/setting': grpclib.const.Handler(
                 self.setting,
@@ -383,6 +471,18 @@ class CompanionServiceBase(abc.ABC):
                 grpclib.const.Cardinality.STREAM_UNARY,
                 idb_pb2.AddMediaRequest,
                 idb_pb2.AddMediaResponse,
+            ),
+            '/idb.CompanionService/inject_audio': grpclib.const.Handler(
+                self.inject_audio,
+                grpclib.const.Cardinality.STREAM_UNARY,
+                idb_pb2.InjectAudioRequest,
+                idb_pb2.InjectAudioResponse,
+            ),
+            '/idb.CompanionService/inject_video': grpclib.const.Handler(
+                self.inject_video,
+                grpclib.const.Cardinality.STREAM_STREAM,
+                idb_pb2.InjectVideoRequest,
+                idb_pb2.InjectVideoResponse,
             ),
             '/idb.CompanionService/record': grpclib.const.Handler(
                 self.record,
@@ -510,6 +610,12 @@ class CompanionServiceStub:
             idb_pb2.DapRequest,
             idb_pb2.DapResponse,
         )
+        self.forward_port = grpclib.client.StreamStreamMethod(
+            channel,
+            '/idb.CompanionService/forward_port',
+            idb_pb2.ForwardPortRequest,
+            idb_pb2.ForwardPortResponse,
+        )
         self.describe = grpclib.client.UnaryUnaryMethod(
             channel,
             '/idb.CompanionService/describe',
@@ -521,12 +627,6 @@ class CompanionServiceStub:
             '/idb.CompanionService/install',
             idb_pb2.InstallRequest,
             idb_pb2.InstallResponse,
-        )
-        self.instruments_run = grpclib.client.StreamStreamMethod(
-            channel,
-            '/idb.CompanionService/instruments_run',
-            idb_pb2.InstrumentsRunRequest,
-            idb_pb2.InstrumentsRunResponse,
         )
         self.log = grpclib.client.UnaryStreamMethod(
             channel,
@@ -540,6 +640,12 @@ class CompanionServiceStub:
             idb_pb2.XctraceRecordRequest,
             idb_pb2.XctraceRecordResponse,
         )
+        self.profile = grpclib.client.StreamStreamMethod(
+            channel,
+            '/idb.CompanionService/profile',
+            idb_pb2.ProfileRequest,
+            idb_pb2.ProfileResponse,
+        )
         self.accessibility_info = grpclib.client.UnaryUnaryMethod(
             channel,
             '/idb.CompanionService/accessibility_info',
@@ -552,11 +658,35 @@ class CompanionServiceStub:
             idb_pb2.AccessibilityActionRequest,
             idb_pb2.AccessibilityActionResponse,
         )
+        self.accessibility_quiescence = grpclib.client.UnaryStreamMethod(
+            channel,
+            '/idb.CompanionService/accessibility_quiescence',
+            idb_pb2.AccessibilityQuiescenceRequest,
+            idb_pb2.AccessibilityQuiescenceResponse,
+        )
         self.focus = grpclib.client.UnaryUnaryMethod(
             channel,
             '/idb.CompanionService/focus',
             idb_pb2.FocusRequest,
             idb_pb2.FocusResponse,
+        )
+        self.get_orientation = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/idb.CompanionService/get_orientation',
+            idb_pb2.GetOrientationRequest,
+            idb_pb2.GetOrientationResponse,
+        )
+        self.set_orientation = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/idb.CompanionService/set_orientation',
+            idb_pb2.SetOrientationRequest,
+            idb_pb2.SetOrientationResponse,
+        )
+        self.hinge_angle = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/idb.CompanionService/hinge_angle',
+            idb_pb2.HingeAngleRequest,
+            idb_pb2.HingeAngleResponse,
         )
         self.hid = grpclib.client.StreamUnaryMethod(
             channel,
@@ -581,6 +711,18 @@ class CompanionServiceStub:
             '/idb.CompanionService/send_notification',
             idb_pb2.SendNotificationRequest,
             idb_pb2.SendNotificationResponse,
+        )
+        self.delivered_notifications = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/idb.CompanionService/delivered_notifications',
+            idb_pb2.DeliveredNotificationsRequest,
+            idb_pb2.DeliveredNotificationsResponse,
+        )
+        self.clear_delivered_notifications = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/idb.CompanionService/clear_delivered_notifications',
+            idb_pb2.ClearDeliveredNotificationsRequest,
+            idb_pb2.ClearDeliveredNotificationsResponse,
         )
         self.simulate_memory_warning = grpclib.client.UnaryUnaryMethod(
             channel,
@@ -623,6 +765,12 @@ class CompanionServiceStub:
             '/idb.CompanionService/photos_clear',
             idb_pb2.PhotosClearRequest,
             idb_pb2.PhotosClearResponse,
+        )
+        self.lock_screen = grpclib.client.UnaryUnaryMethod(
+            channel,
+            '/idb.CompanionService/lock_screen',
+            idb_pb2.LockScreenRequest,
+            idb_pb2.LockScreenResponse,
         )
         self.setting = grpclib.client.UnaryUnaryMethod(
             channel,
@@ -671,6 +819,18 @@ class CompanionServiceStub:
             '/idb.CompanionService/add_media',
             idb_pb2.AddMediaRequest,
             idb_pb2.AddMediaResponse,
+        )
+        self.inject_audio = grpclib.client.StreamUnaryMethod(
+            channel,
+            '/idb.CompanionService/inject_audio',
+            idb_pb2.InjectAudioRequest,
+            idb_pb2.InjectAudioResponse,
+        )
+        self.inject_video = grpclib.client.StreamStreamMethod(
+            channel,
+            '/idb.CompanionService/inject_video',
+            idb_pb2.InjectVideoRequest,
+            idb_pb2.InjectVideoResponse,
         )
         self.record = grpclib.client.StreamStreamMethod(
             channel,

@@ -1,5 +1,3 @@
 aiofiles
 grpclib>=0.4.0
-protobuf
-treelib
-pyre-extensions
+protobuf>=7.35.1

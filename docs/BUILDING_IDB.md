@@ -2,116 +2,89 @@
 
 rules_idb drives tests through Facebook's [idb](https://github.com/facebook/idb):
 a per-simulator gRPC daemon (`idb_companion`, built on FBSimulatorControl)
-plus a thin python CLI client (`idb`). The 2022 binary releases are broken on
-current machines (see the README), so both are built from `main`. Verified
-against commit `3f1bb6eb3ae7041ba4902605c6a5a4d686ccc3f8` (2026-08-22) with
-Xcode 26.2 on macOS 26. (Previously verified against `70d75b3`,
-2026-07-10.)
+plus a thin python CLI client (`idb`). Both are built from the **v1.7.8**
+release (commit `c793afad2a31092628f7013cf1aa96f266c85024`, 2026-11-01) with
+`patches/idb-build-fixes.patch` applied. arm64 only: upstream builds arm64
+only, and so does rules_idb.
+
+Upstream now publishes its own companion (`idb-companion.macos-arm64.tar.gz`)
+and client (`fb_idb` wheel) with every release. rules_idb still builds its
+own because the fixes below are not in a release yet; once they are, the
+patch can be dropped and the official artifacts used directly.
+
+## The patch
+
+Each fix is also proposed upstream; drop it from the patch once a release
+includes it.
+
+* **Swift test bundles can load their dylibs** (`FBXCTestCore/Configuration/TestRunnerConfiguration.swift`):
+  adds the platform's `Developer/usr/lib` (holding
+  `libXCTestSwiftSupport.dylib`) to the test host's
+  `DYLD_FALLBACK_LIBRARY_PATH`, as Xcode's runners do. facebook/idb#TBD-A
+* **Request `DYLD_*` variables extend the runner's** (`FBXCTestCore/Runners/ManagedTestRunner.swift`):
+  so sanitizer runtimes and the Main Thread Checker can ride along with the
+  test shim in `DYLD_INSERT_LIBRARIES`. facebook/idb#TBD-B
+* **Configurable test bundle connection timeouts** (`FBXCTestCore/TestManager/TestBundleConnection.swift`,
+  new `TestBundleConnectionTimeouts.swift`): `FBXCTEST_BUNDLE_READY_TIMEOUT`,
+  `FBXCTEST_IDE_INTERFACE_TIMEOUT` and `FBXCTEST_DAEMON_SESSION_TIMEOUT`
+  (seconds; default 60). The runner shortens them so a host that dies at
+  startup fails fast. facebook/idb#TBD-C
+* **A failed last xctest response ends the RPC** (`IDBXCTestReporter.swift`):
+  instead of hanging until the client's timeout. facebook/idb#TBD-D
+* **A UI-test target app that already exited does not fail the run**
+  (`FBXCTestCore/TestManager/TestManagerAPIMediator.swift`). facebook/idb#TBD-F
+* **`--randomize-execution-order`** (`proto/idb.proto` field
+  `XctestRunRequest.randomize_execution_order`, plumbed through the
+  companion, FBXCTestCore and the python client): sets
+  `XCTestConfiguration.testExecutionOrdering` to random. Used by
+  `random = True`. facebook/idb#TBD-E
+* **Filtered runs no longer crash the companion** (`FBXCTestCore/Configuration/TestConfiguration.swift`):
+  new in v1.7.8's Swift port of the test configuration. `XCTTestIdentifier`'s
+  `+alloc` returns a shared placeholder that its initializer over-releases,
+  so app-hosted runs with `--tests-to-run`/`--tests-to-skip` segfaulted the
+  companion. That breaks `shard_count` and `--test_filter`. The patch
+  retains the placeholder before each initializer. facebook/idb#TBD-G
+
+What the patch no longer carries, compared with the `3f1bb6e` pin: the
+toolchain workarounds (upstream code was rewritten), the single
+`AsyncIterator` crash fix (upstream's `RequestStreamReader` fixes it the
+same way), and the `FBiOSTarget` `@_cdecl` workaround.
 
 ## Prerequisites
 
 ```sh
-brew install xcodegen protobuf swift-protobuf uv
+brew install xcodegen protobuf uv
 ```
+
+Xcode 26 or newer. Upstream builds with the newest Xcode on GitHub's
+`macos-26` image, and so does rules_idb's CI; older Xcode 26.x compilers
+reject some of upstream's Swift 6 concurrency code. If yours does, build
+with `SWIFT_VERSION=5` locally (only to try a change; release artifacts come
+from CI).
 
 ## 1. Clone and patch
 
 ```sh
 git clone https://github.com/facebook/idb.git ~/workspace/idb-src
 cd ~/workspace/idb-src
+git checkout v1.7.8
 git apply /path/to/rules_idb/patches/idb-build-fixes.patch
 ```
 
-The patch carries fixes for upstream issues in the open-source build (Meta
-builds internally with Buck; none of these paths are covered by their CI).
-Two fixes that were needed at `70d75b3` are gone as of `3f1bb6e` — upstream
-now ships `Companion/project.yml`'s `ReplProtocol`/`CompanionDiscovery`
-targets and `protoc_compiler_template.py`'s `grpclib.plugin.main` import
-directly — so the patch no longer touches those two files.
-
-Behavioral fixes (carried since `70d75b3`):
-
-* **`FBiOSTarget.h` / `FBiOSTarget.swift`**: two C functions are
-  reimplemented in Swift with `@_cdecl` while their `_Nonnull` C prototypes
-  stay in the header. Swift serializes the `@_cdecl` thunk's SIL with an
-  `Optional` object return; a Swift consumer importing the C prototype types
-  it non-optional, and swift-frontend aborts with a `SILFunction type
-  mismatch` deserialization failure when compiling `idb_companion` in
-  Release. The patch marks the prototypes `NS_SWIFT_UNAVAILABLE` and exposes
-  renamed `public` Swift functions instead.
-* **Single-`AsyncIterator` crash across multi-frame handlers** (new file
-  `Companion/Utility/SingleIteratorRequestStream.swift`, plus edits to
-  `Install`/`Record`/`Launch`/`Tail`/`XctraceRecord`/`InstrumentsRun`/`Dap`/
-  `Repl`/`VideoStream` method handlers and `MultisourceFileReader`):
-  grpc-swift's `GRPCAsyncRequestStream` (backed by
-  `NIOThrowingAsyncSequenceProducer`) fatal-errors if more than one
-  `AsyncIterator` is ever created from it. The `AsyncSequence.requiredNext`
-  helper reads via `first(where:)` — a *new* iterator each call — and a
-  `for try await … in requestStream` loop makes one too, so any handler that
-  combines two such reads on one stream aborts the whole companion on the
-  second read (`idb install`, `idb video`/recording, `launch --wait-for`,
-  `tail`, `xctrace`, `instruments`, `dap`, `repl`, `video-stream`, and
-  `push`/`add-media` via `MultisourceFileReader`). The patch adds a shared
-  `SingleIteratorRequestStream` that owns one iterator per RPC and routes
-  every multi-frame read (including the `for try await` loops, rewritten as
-  `while let request = try await stream.next()`) through it. This is what
-  unblocks `RULES_IDB_RECORD_VIDEO`. Upstreamed as facebook/idb#955 — drop
-  these hunks once the vendored pin includes it.
-* **`FBTestRunnerConfiguration.swift`**: adds the platform's
-  `Developer/usr/lib` to the test host's `DYLD_FALLBACK_LIBRARY_PATH` so
-  Swift test bundles can load `libXCTestSwiftSupport.dylib`; also plumbs a
-  `FB_XCTEST_EXECUTION_ORDERING=random` launch-env key into
-  `XCTestConfiguration.testExecutionOrdering`.
-* **`FBManagedTestRunStrategy.swift`**: request-provided `DYLD_*` variables
-  are appended to (not replacing) the composed launch values, so sanitizer
-  runtimes can ride along with the test shim.
-* **`FBTestManagerAPIMediator.swift`**: failing to terminate the app under
-  test during UI-test teardown (it usually already exited) no longer fails
-  the run.
-
-Toolchain-compatibility fixes (new at `3f1bb6e`, Swift 6.2.3 /
-swiftlang-6.2.3.3.21 on Xcode 26.2 — none of these are behavioral, they only
-work around the current Swift compiler rejecting patterns upstream's own
-code already uses elsewhere):
-
-* **`FBRemoteInvoking.swift`**: upstream already has a `nonisolated(unsafe)`
-  workaround here for a `sending Result<Any?, Error>` false positive (see
-  their own commit `3a78617`), but it doesn't fully satisfy this compiler.
-  Applying `nonisolated(unsafe)` to the constructed `Result` itself (not
-  just the payload inside it) does.
-* **`FBAXBridgeTransport.swift`**: two `[String]`-returning functions built
-  their argument list as one long `+`-chained expression; the type checker
-  times out on it under this compiler. Rewritten as a `var` built up
-  statement-by-statement.
-* **`Companion/main.swift`, `LaunchMethodHandler.swift`,
-  `ReplSocketClient.swift`**: `Task { ... }` / `group.addTask { ... }`
-  closures capturing already-`nonisolated(unsafe)`-rebound values still hit
-  "passing closure as a 'sending' parameter risks causing data races" here.
-  Giving the closure itself an explicit `@Sendable` type annotation (in
-  addition to the existing `nonisolated(unsafe)` rebind of its captures)
-  resolves it; `nonisolated(unsafe)` alone does not, even though the
-  otherwise-identical pattern in `LogMethodHandler.swift` compiles as only a
-  warning without it. This diagnostic is flaky in exactly the way upstream's
-  own `FBRemoteInvoking.swift` comment predicts ("newer Swift compilers no
-  longer treat the [...] parameter as region-disconnected"); re-verify these
-  four spots against whatever Swift toolchain is current when next bumping
-  the pin.
-
 ## 2. Build the companion
 
+Only what the test runner needs (upstream's `./build.sh build all` also
+builds the REPL, sim-video and the tvOS simulator bridge, which needs the
+tvOS simulator SDK):
+
 ```sh
-cd ~/workspace/idb-src
-./build.sh build shims
-./build.sh build SimulatorFrameworkBridge
-./build.sh build idb_companion || ./build.sh build idb_companion
-# (a clean first invocation can fail with "no such module IDBGRPCSwift";
-# the retry succeeds — upstream project-generation quirk)
+./build.sh build Shimulator-iOS
+./build.sh build Shimulator-macOS
+./build.sh build SimulatorFrameworkBridge-iOS
+./build.sh build idb_companion
 ```
 
-Then assemble the runtime layout (skipping `idb-repl`; as of `3f1bb6e`
-upstream's `Companion/project.yml` does define the `CompanionDiscovery`
-target it needs, but building `idb-repl` itself is untested here and not
-required for the companion/client this repo uses):
+Then assemble the runtime layout:
 
 ```sh
 R=Build/Products/Release; S=Build/Products/Release-iphonesimulator
@@ -120,42 +93,29 @@ mkdir -p "$D/Resources"
 cp $R/idb_companion "$D/"
 for b in $R/*.bundle; do ditto "$b" "$D/$(basename "$b")"; done
 cp $S/libShimulator-iOS.dylib $R/libShimulator-macOS.dylib \
-   $S/libRepl-iOS.dylib $R/libRepl-macOS.dylib \
-   $S/SimulatorFrameworkBridge "$D/Resources/"
+   $S/SimulatorFrameworkBridge-iOS "$D/Resources/"
 ```
-
-Copy the layout **out of the source tree**: python wheel builds write to
-`build/`, which collides with Xcode's `Build/` on case-insensitive APFS and
-deletes your compiled products.
 
 ## 3. Build the python client
 
 ```sh
 uv venv --python 3.12 /path/to/rules_idb/.venv-src
-uv pip install --python /path/to/rules_idb/.venv-src/bin/python3 \
-  pip setuptools wheel grpcio-tools grpclib pyre-extensions
-cd ~/workspace/idb-src
-PATH="/path/to/rules_idb/.venv-src/bin:$PATH" FB_IDB_VERSION=1.2.0.dev1 \
-  /path/to/rules_idb/.venv-src/bin/pip install --no-build-isolation .
+mkdir /tmp/idb-py && git archive HEAD | tar -x -C /tmp/idb-py
+git diff | (cd /tmp/idb-py && git apply)   # the patch, if not committed
+FB_IDB_VERSION=1.7.8 uv pip install --python /path/to/rules_idb/.venv-src/bin/python /tmp/idb-py
 ```
 
-The client imports one Meta-internal module that isn't published; shim it:
+Install from a copy outside the source tree: the python build writes to
+`build/`, which collides with Xcode's `Build/` on case-insensitive APFS.
+
+To re-vendor `third_party/idb_client`, copy the installed package (it
+includes the generated `idb_pb2.py` / `idb_grpc.py`), leaving out tests:
 
 ```sh
 SP=/path/to/rules_idb/.venv-src/lib/python3.12/site-packages
-mkdir -p $SP/python/migrations
-touch $SP/python/__init__.py $SP/python/migrations/__init__.py
-cat > $SP/python/migrations/py310.py <<'EOF'
-import enum
-import sys
-
-if sys.version_info >= (3, 11):
-    StrEnum310 = enum.StrEnum
-else:
-    class StrEnum310(str, enum.Enum):
-        def __str__(self):
-            return str(self.value)
-EOF
+rm -rf third_party/idb_client/idb
+rsync -a --exclude __pycache__ --exclude tests --exclude '*_tests.py' \
+  "$SP/idb/" third_party/idb_client/idb/
 ```
 
 ## 4. Point rules_idb at the toolchain
@@ -166,6 +126,9 @@ bazel test //examples:HostedTests \
   --test_env=RULES_IDB_COMPANION_PATH=/path/to/rules_idb/tools/idb-dist/idb_companion
 ```
 
+or package the layout (`tar -czf dist.tar.gz -C tools/idb-dist .`) and set
+`RULES_IDB_COMPANION_DIST_URL=file:///path/to/dist.tar.gz`.
+
 Notes:
 
 * The companion cannot bind TCP ports on macOS 26 when unsigned (EPERM from
@@ -174,16 +137,3 @@ Notes:
 * Companions persist per simulator UDID (registered under `/tmp/idb`) and
   are reused across runs. Stale registry entries after killing companions
   can be cleared with `rm -rf /tmp/idb ~/.idb`.
-* When bumping the pinned commit, delete any stale generated
-  `IDBGRPCSwift/idb.grpc.swift` / `idb.pb.swift` from a previous build
-  before running `build.sh build idb_companion` again — it only regenerates
-  them when they're *absent*, and stale ones from the old commit's
-  `proto/idb.proto` compile against the new Swift/companion sources with
-  wrong field names, producing confusing "cannot find type" / "has no
-  member" errors that look unrelated to protos.
-* Re-vendoring `third_party/idb_client`'s generated `idb_pb2.py` /
-  `idb_grpc.py` (e.g. via `python -m grpc_tools.protoc` plus a
-  `grpclib.plugin.main`-based `protoc-gen-python_grpc` plugin) produces an
-  `import idb_pb2` in `idb_grpc.py`; hand-fix it to
-  `import idb.grpc.idb_pb2 as idb_pb2` to match the package layout the rest
-  of the vendored client expects.

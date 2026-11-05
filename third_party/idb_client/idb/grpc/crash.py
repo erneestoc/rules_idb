@@ -4,9 +4,6 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
-
-from typing import List
 
 from idb.common.types import CrashLog, CrashLogInfo, CrashLogQuery
 from idb.grpc.idb_pb2 import (
@@ -37,7 +34,8 @@ def _to_crash_log(proto: CrashShowResponse) -> CrashLog:
     return CrashLog(info=_to_crash_log_info(proto.info), contents=proto.contents)
 
 
-def _to_crash_log_query_proto(query: CrashLogQuery) -> CrashLogQueryProto:
+def crash_log_query_to_grpc(query: CrashLogQuery) -> CrashLogQueryProto:
+    """Build the request used by the crash-list and crash-delete RPCs."""
     return CrashLogQueryProto(
         # pyre-ignore
         before=query.before,

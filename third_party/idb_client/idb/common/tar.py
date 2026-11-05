@@ -4,16 +4,15 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 import asyncio
+import contextlib
 import os
 import sys
 import tempfile
 import uuid
 from abc import abstractmethod
 from collections.abc import AsyncGenerator, AsyncIterator
-from typing import List, Optional
 
 from idb.common.types import Compression
 from idb.utils.contextlib import asynccontextmanager
@@ -29,6 +28,12 @@ def _has_executable(exe: str) -> bool:
 
 
 READ_CHUNK_SIZE: int = 1024 * 1024 * 4  # 4Mb, the default max read for gRPC
+
+
+def _tar_environment() -> dict[str, str]:
+    # Otherwise macOS tar adds an AppleDouble entry for every file's extended attributes, which
+    # takes several times longer than archiving the files themselves, and bundles don't need them.
+    return {**os.environ, "COPYFILE_DISABLE": "1"}
 
 
 async def is_gnu_tar() -> bool:
@@ -79,16 +84,61 @@ class TarArchiveProcess:
                 command.extend(["-C", os.path.dirname(path), os.path.basename(path)])
 
     @property
-    @abstractmethod
     def _tar_command(self) -> list[str]:
+        return ["tar", "vcf" if self._verbose else "cf", "-"]
+
+    @property
+    @abstractmethod
+    def _compress_command(self) -> list[str]:
         pass
 
+    # tar's own compress-program support is not used: bsdtar pads the compressed output to its
+    # block size with zeros, which zstd rejects as a malformed frame.
     @asynccontextmanager
-    @abstractmethod
-    def _run_process(
+    async def _run_process(
         self, command: list[str]
     ) -> AsyncGenerator[asyncio.subprocess.Process, None]:
-        pass
+        compress_command = self._compress_command
+        pipe_read, pipe_write = os.pipe()
+        try:
+            process_tar = await asyncio.create_subprocess_exec(
+                *command, stderr=sys.stderr, stdout=pipe_write, env=_tar_environment()
+            )
+        except BaseException:
+            os.close(pipe_read)
+            raise
+        finally:
+            os.close(pipe_write)
+        try:
+            process_compressor = await asyncio.create_subprocess_exec(
+                *compress_command,
+                stdin=pipe_read,
+                stderr=sys.stderr,
+                stdout=asyncio.subprocess.PIPE,
+            )
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError):
+                process_tar.kill()
+            await process_tar.wait()
+            raise
+        finally:
+            os.close(pipe_read)
+        processes = (process_tar, process_compressor)
+        try:
+            yield process_compressor
+        except BaseException:
+            # A caller that stops reading leaves both blocked on full pipes.
+            for process in processes:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+            raise
+        finally:
+            await asyncio.gather(*(process.wait() for process in processes))
+        # The compressor exits cleanly on whatever tar managed to write.
+        if process_tar.returncode != 0:
+            raise TarException(
+                f"Failed to create tar file, tar exited with {process_tar.returncode}"
+            )
 
 
 class GzipArchive(TarArchiveProcess):
@@ -97,60 +147,69 @@ class GzipArchive(TarArchiveProcess):
     )
 
     @property
-    def _tar_command(self) -> list[str]:
-        return ["tar", "vcf" if self._verbose else "cf", "-"]
-
-    @asynccontextmanager
-    async def _run_process(
-        self, command: list[str]
-    ) -> AsyncGenerator[asyncio.subprocess.Process, None]:
-        pipe_read, pipe_write = os.pipe()
-        process_tar = await asyncio.create_subprocess_exec(
-            *command, stderr=sys.stderr, stdout=pipe_write
-        )
-        os.close(pipe_write)
-        process_compressor = await asyncio.create_subprocess_exec(
-            *self.GZIP_COMPRESSION_COMMAND,
-            stdin=pipe_read,
-            stderr=sys.stderr,
-            stdout=asyncio.subprocess.PIPE,
-        )
-        os.close(pipe_read)
-        yield process_compressor
-        await asyncio.gather(process_tar.wait(), process_compressor.wait())
+    def _compress_command(self) -> list[str]:
+        return self.GZIP_COMPRESSION_COMMAND
 
 
 class ZstdArchive(TarArchiveProcess):
     ZSTD_EXECUTABLES: list[str] = ["pzstd", "zstd"]  # in the order of preference
 
     @property
-    def _tar_command(self) -> list[str]:
-        return [
-            "tar",
-            "--use-compress-program",
-            self._get_zstd_exe(),
-            "-vcf" if self._verbose else "-cf",
-            "-",
-        ]
+    def _compress_command(self) -> list[str]:
+        return [self._get_zstd_exe(), "-c"]
 
-    @asynccontextmanager
-    async def _run_process(
-        self, command: list[str]
-    ) -> AsyncGenerator[asyncio.subprocess.Process, None]:
-        process = await asyncio.create_subprocess_exec(
-            *command, stderr=sys.stderr, stdout=asyncio.subprocess.PIPE
-        )
-        yield process
-        await process.wait()
+    @classmethod
+    def _find_zstd_exe(cls) -> str | None:
+        return next((exe for exe in cls.ZSTD_EXECUTABLES if _has_executable(exe)), None)
 
     @classmethod
     def _get_zstd_exe(cls) -> str:
-        for zstd_exe in cls.ZSTD_EXECUTABLES:
-            if _has_executable(zstd_exe):
-                return zstd_exe
-        raise Exception(
-            f"Missing ZSTD dependencies. Make sure either of {cls.ZSTD_EXECUTABLES} is on the PATH"
-        )
+        zstd_exe = cls._find_zstd_exe()
+        if zstd_exe is None:
+            raise Exception(
+                f"Missing ZSTD dependencies. Make sure either of {cls.ZSTD_EXECUTABLES} is on the PATH"
+            )
+        return zstd_exe
+
+
+def has_zstd_compressor() -> bool:
+    return ZstdArchive._find_zstd_exe() is not None
+
+
+async def compress_zstd(chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    process = await asyncio.create_subprocess_exec(
+        ZstdArchive._get_zstd_exe(),
+        "-q",
+        "-c",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=sys.stderr,
+    )
+    writer = none_throws(process.stdin)
+    reader = none_throws(process.stdout)
+
+    async def feed() -> None:
+        try:
+            async for chunk in chunks:
+                writer.write(chunk)
+                await writer.drain()
+        finally:
+            writer.close()
+
+    feeding = asyncio.create_task(feed())
+    try:
+        while data := await reader.read(READ_CHUNK_SIZE):
+            yield data
+        await feeding
+    except BaseException:
+        feeding.cancel()
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        raise
+    finally:
+        returncode = await process.wait()
+    if returncode != 0:
+        raise TarException(f"zstd exited with non-zero exit code {returncode}")
 
 
 def _create_untar_command(
@@ -184,7 +243,7 @@ async def create_tar(
         if process.returncode != 0:
             raise TarException(
                 "Failed to create tar file, "
-                "tar command exited with non-zero exit code {process.returncode}"
+                f"tar command exited with non-zero exit code {process.returncode}"
             )
         return tar_contents
 

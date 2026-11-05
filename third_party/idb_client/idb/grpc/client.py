@@ -4,7 +4,6 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 import asyncio
 import codecs
@@ -17,7 +16,13 @@ import sys
 import tempfile
 import urllib.parse
 from asyncio import StreamReader, StreamWriter
-from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Iterable
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Callable,
+    Iterable,
+)
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -26,7 +31,7 @@ import idb.common.plugin as plugin
 from grpclib.client import Channel
 from grpclib.exceptions import GRPCError, ProtocolError, StreamTerminatedError
 from idb.common.constants import TESTS_POLL_INTERVAL
-from idb.common.file import drain_to_file
+from idb.common.file import drain_to_file, generate_file_chunks
 from idb.common.format import json_format_debugger_info
 from idb.common.gzip import drain_gzip_decompress, gunzip
 from idb.common.hid import (
@@ -45,13 +50,17 @@ from idb.common.logging import log_call
 from idb.common.stream import stream_map
 from idb.common.tar import create_tar, drain_untar, generate_tar
 from idb.common.types import (
+    AccessibilityBackend,
+    AccessibilityDragOptions,
     AccessibilityInfo,
     AccessibilityInfoOptions,
     AccessibilityMarker,
     AccessibilityPoint,
     AccessibilityScrollDirection,
     AccessibilitySearchableKey,
+    AccessibilitySearchDiagnostics,
     AccessibilityTarget,
+    AccessibilityWaitResult,
     Address,
     AppProcessState,
     Client as ClientBase,
@@ -62,6 +71,9 @@ from idb.common.types import (
     CrashLog,
     CrashLogInfo,
     CrashLogQuery,
+    DEFAULT_SCREENSHOT_OPTIONS,
+    DeliveredNotification,
+    DeviceOrientation,
     DomainSocketAddress,
     FileContainer,
     FileContainerType,
@@ -69,25 +81,40 @@ from idb.common.types import (
     FileListing,
     HIDButtonType,
     HIDEvent,
+    HIDHinge,
     HIDOrientationType,
     IdbConnectionException,
     IdbException,
     InstalledAppInfo,
     InstalledArtifact,
     InstalledTestInfo,
-    InstrumentsTimings,
+    LockState,
     LoggingMetadata,
     OnlyFilter,
     Permission,
+    ProfileKind,
+    ProfileResult,
+    ProfileTarget,
+    QuiescenceEvent,
+    QuiescenceState,
+    QuiescenceStateChanged,
+    QuiescenceTargetChanged,
+    QuiescenceTargetExited,
+    QuiescenceTouchesCompleted,
+    RecordedAudio,
+    RetryVerdict,
+    Screenshot,
+    ScreenshotOptions,
     TargetDescription,
     TCPAddress,
     TestRunInfo,
     VideoFormat,
 )
+from idb.grpc.accessibility import accessibility_info_to_grpc
 from idb.grpc.crash import (
     _to_crash_log,
     _to_crash_log_info_list,
-    _to_crash_log_query_proto,
+    crash_log_query_to_grpc,
 )
 from idb.grpc.dap import RemoteDapServer
 from idb.grpc.file import container_to_grpc as file_container_to_grpc
@@ -95,10 +122,13 @@ from idb.grpc.hid import event_to_grpc
 from idb.grpc.idb_grpc import CompanionServiceStub
 from idb.grpc.idb_pb2 import (
     AccessibilityActionRequest,
-    AccessibilityInfoRequest,
+    AccessibilityActionResponse,
+    AccessibilityQuiescenceRequest,
+    AccessibilityQuiescenceResponse,
     AddMediaRequest,
     ANY as AnySetting,
     ApproveRequest,
+    ClearDeliveredNotificationsRequest,
     ClearKeychainRequest,
     ConnectRequest,
     ContactsClearRequest,
@@ -106,15 +136,21 @@ from idb.grpc.idb_pb2 import (
     CrashShowRequest,
     DebugServerRequest,
     DebugServerResponse,
+    DeliveredNotificationsRequest,
     FocusRequest,
+    GetOrientationRequest,
+    GetOrientationResponse,
     GetSettingRequest,
+    HingeAngleRequest,
+    InjectAudioRequest,
+    InjectVideoRequest,
     InstallRequest,
-    InstrumentsRunRequest,
     LaunchRequest,
     ListAppsRequest,
     ListSettingRequest,
     LOCALE as LocaleSetting,
     Location,
+    LockScreenRequest,
     LogRequest,
     LsRequest,
     MkdirRequest,
@@ -125,11 +161,12 @@ from idb.grpc.idb_pb2 import (
     PullRequest,
     PushRequest,
     RecordRequest,
+    RecordResponse,
     RevokeRequest,
     RmRequest,
-    ScreenshotRequest,
     SendNotificationRequest,
     SetLocationRequest,
+    SetOrientationRequest,
     SettingRequest,
     SimulateMemoryWarningRequest,
     TailRequest,
@@ -148,13 +185,23 @@ from idb.grpc.install import (
     generate_binary_chunks,
     generate_io_chunks,
     generate_requests,
+    ipa_size,
+    remaining_size,
+    select_stream_compression,
+    UploadProgress,
 )
-from idb.grpc.instruments import (
-    instruments_drain_until_running,
-    instruments_generate_bytes,
-    translate_instruments_timings,
+from idb.grpc.launch import drain_launch_stream, wait_for_launch_stream
+from idb.grpc.port_forward import forward_port
+from idb.grpc.profile import (
+    accepts_stop,
+    drain_artifact,
+    drain_profile,
+    message_to_json,
+    ProfileException,
+    start_request,
 )
-from idb.grpc.launch import drain_launch_stream, end_launch_stream
+from idb.grpc.screenshot import screenshot_from_grpc, screenshot_to_grpc
+from idb.grpc.status_details import RetryVerdictCodec
 from idb.grpc.stream import (
     cancel_wrapper,
     drain_to_stream,
@@ -162,7 +209,7 @@ from idb.grpc.stream import (
     stop_wrapper,
 )
 from idb.grpc.target import companion_to_py, target_to_py
-from idb.grpc.video import generate_video_bytes
+from idb.grpc.video import generate_video_bytes, recorded_audio_from_grpc
 from idb.grpc.xctest import (
     make_request,
     make_results,
@@ -207,6 +254,47 @@ COMPRESSION_MAP: dict[Compression, "Payload.Compression"] = {
 }
 
 
+_QUIESCENCE_STATES: dict[int, QuiescenceState] = {
+    AccessibilityQuiescenceResponse.BUSY: QuiescenceState.BUSY,
+    AccessibilityQuiescenceResponse.SETTLING: QuiescenceState.SETTLING,
+    AccessibilityQuiescenceResponse.QUIET: QuiescenceState.QUIET,
+}
+
+_QUIESCENCE_SIGNALS: dict[int, str] = {
+    AccessibilityQuiescenceResponse.RUN_LOOP_IDLE: "run_loop_idle",
+    AccessibilityQuiescenceResponse.ANIMATIONS_INACTIVE: "animations_inactive",
+}
+
+
+def _quiescence_event_from_grpc(
+    response: AccessibilityQuiescenceResponse,
+) -> QuiescenceEvent:
+    pid = response.pid
+    event = response.WhichOneof("event")
+    if event == "touches_completed":
+        return QuiescenceTouchesCompleted(pid=pid)
+    if event == "target_changed":
+        return QuiescenceTargetChanged(pid=pid)
+    if event == "target_exited":
+        return QuiescenceTargetExited(pid=pid)
+    if event != "state" or response.state.state not in _QUIESCENCE_STATES:
+        raise IdbException(f"The companion sent an unknown quiescence event {event}")
+    return QuiescenceStateChanged(
+        pid=pid,
+        state=_QUIESCENCE_STATES[response.state.state],
+        # A signal newer than this client is still reported, by its number.
+        busy_signals=tuple(
+            _QUIESCENCE_SIGNALS.get(signal, str(signal))
+            for signal in response.state.busy_signals
+        ),
+    )
+
+
+def _idb_exception(error: GRPCError) -> IdbException:
+    retry = error.details if isinstance(error.details, RetryVerdict) else None
+    return IdbException(error.message, retry=retry)  # noqa B306
+
+
 def log_and_handle_exceptions(grpc_method_name: str):  # pyre-ignore
     metadata: LoggingMetadata = {
         "grpc_method_name": grpc_method_name,
@@ -219,7 +307,7 @@ def log_and_handle_exceptions(grpc_method_name: str):  # pyre-ignore
             try:
                 return await func(*args, **kwargs)
             except GRPCError as e:
-                raise IdbException(e.message) from e  # noqa B306
+                raise _idb_exception(e) from e
             except (ProtocolError, StreamTerminatedError) as e:
                 raise IdbException(e.args) from e
             except OSError as e:
@@ -232,7 +320,7 @@ def log_and_handle_exceptions(grpc_method_name: str):  # pyre-ignore
                 async for item in func(*args, **kwargs):
                     yield item
             except GRPCError as e:
-                raise IdbException(e.message) from e  # noqa B306
+                raise _idb_exception(e) from e
             except (ProtocolError, StreamTerminatedError) as e:
                 raise IdbException(e.args) from e
             except OSError as e:
@@ -246,6 +334,22 @@ def log_and_handle_exceptions(grpc_method_name: str):  # pyre-ignore
     return decorating
 
 
+def _video_injection_file(path: str) -> str:
+    file_path = os.path.realpath(path)
+    if not os.path.isfile(file_path):
+        raise IdbException(f"Video injection input is not a regular file: {file_path}")
+    return file_path
+
+
+async def _read_audio_chunks(file_path: str) -> AsyncIterator[bytes]:
+    """Reports a failure to read the local file as such, not as a lost companion connection."""
+    try:
+        async for chunk in generate_file_chunks(file_path):
+            yield chunk
+    except OSError as error:
+        raise IdbException(f"Could not read {file_path}: {error}") from error
+
+
 class Client(ClientBase):
     def __init__(
         self,
@@ -256,6 +360,10 @@ class Client(ClientBase):
         self.stub = stub
         self.companion = companion
         self.logger = logger
+
+    @property
+    def metadata(self) -> LoggingMetadata:
+        return plugin.current_scoped_invocation_metadata()
 
     @property
     def address(self) -> Address:
@@ -298,9 +406,14 @@ class Client(ClientBase):
                 port=address.port,
                 loop=asyncio.get_running_loop(),
                 ssl=ssl_context,
+                status_details_codec=RetryVerdictCodec(),
             )
             if isinstance(address, TCPAddress)
-            else Channel(path=address.path, loop=asyncio.get_running_loop())
+            else Channel(
+                path=address.path,
+                loop=asyncio.get_running_loop(),
+                status_details_codec=RetryVerdictCodec(),
+            )
         ) as channel:
             stub = CompanionServiceStub(channel=channel)
             with tempfile.NamedTemporaryFile(mode="w+b") as f:
@@ -318,6 +431,7 @@ class Client(ClientBase):
                 f"Companion at {address} {'is' if response.companion.is_local else 'is not'} local"
             )
             companion = companion_to_py(companion=response.companion, address=address)
+            plugin.on_companion_connected(logger=logger, companion=companion)
             if exchange_metadata:
                 metadata_from_companion = {
                     key: value
@@ -378,9 +492,13 @@ class Client(ClientBase):
         bundle_type: FileContainerType | None,
         override_modification_time: bool | None = None,
         skip_signing_bundles: bool | None = None,
+        connect_to: TCPAddress | None = None,
+        on_upload_progress: Callable[[str], None] | None = None,
     ) -> AsyncIterator[InstalledArtifact]:
+        connect_to_frame = self._connect_to_frame(bundle, connect_to)
         async with self.stub.install.open() as stream:
             generator = None
+            progress = None
             if isinstance(bundle, str):
                 url = urllib.parse.urlparse(bundle)
                 if url.scheme:
@@ -413,18 +531,53 @@ class Client(ClientBase):
                         self.logger.debug(
                             f"Companion is remote, generating binary chunks for {file_path}"
                         )
+                        # Only app and dSYM tars are compressed as declared; the other destinations always send gzip.
+                        if destination in (InstallRequest.APP, InstallRequest.DSYM):
+                            compression = select_stream_compression(
+                                requested=compression,
+                                supported=self.companion.supported_compressions,
+                            )
+                        self.logger.debug(
+                            f"Streaming {file_path} with {(compression or Compression.GZIP).name} compression"
+                        )
+                        if on_upload_progress is not None:
+                            progress = UploadProgress(
+                                report=on_upload_progress,
+                                total=ipa_size(file_path, destination),
+                            )
                         # chunk file from file_path
                         generator = generate_binary_chunks(
                             path=file_path,
                             destination=destination,
                             compression=compression,
                             logger=self.logger,
+                            zstd_zip_stream=self._streams_zips_as_zstd(
+                                destination, compression
+                            ),
+                            progress=progress,
                         )
 
             else:
                 # chunk file from memory
                 self.logger.debug("Sending file data from input stream")
-                generator = generate_io_chunks(io=bundle, logger=self.logger)
+                if on_upload_progress is not None:
+                    progress = UploadProgress(
+                        report=on_upload_progress, total=remaining_size(bundle)
+                    )
+                # `compression` is deliberately not reassigned: these bytes go out
+                # as their producer compressed them, so only a zip may be wrapped.
+                generator = generate_io_chunks(
+                    io=bundle,
+                    logger=self.logger,
+                    zstd_zip_stream=self._streams_zips_as_zstd(
+                        destination,
+                        select_stream_compression(
+                            requested=compression,
+                            supported=self.companion.supported_compressions,
+                        ),
+                    ),
+                    progress=progress,
+                )
                 # stream to companion
             await stream.send_message(InstallRequest(destination=destination))
             if make_debuggable is not None:
@@ -441,12 +594,6 @@ class Client(ClientBase):
                 await stream.send_message(
                     InstallRequest(skip_signing_bundles=skip_signing_bundles)
                 )
-            if compression is not None:
-                await stream.send_message(
-                    InstallRequest(
-                        payload=Payload(compression=COMPRESSION_MAP[compression])
-                    )
-                )
             if bundle_id is not None:
                 link_to_bundle_type = None
                 if bundle_type == FileContainerType.APPLICATION:
@@ -461,15 +608,54 @@ class Client(ClientBase):
                     bundle_id=bundle_id, bundle_type=link_to_bundle_type
                 )
                 await stream.send_message(InstallRequest(link_dsym_to_bundle=message))
+            if connect_to_frame is not None:
+                await stream.send_message(connect_to_frame)
+            if compression is not None:
+                await stream.send_message(
+                    InstallRequest(
+                        payload=Payload(compression=COMPRESSION_MAP[compression])
+                    )
+                )
 
             async for message in generator:
                 await stream.send_message(message)
+            if progress is not None:
+                progress.finish()
             self.logger.debug("Finished sending install payload to companion")
             await stream.end()
             async for response in stream:
                 yield InstalledArtifact(
                     name=response.name, uuid=response.uuid, progress=response.progress
                 )
+
+    def _connect_to_frame(
+        self, bundle: Bundle, connect_to: TCPAddress | None
+    ) -> InstallRequest | None:
+        """The frame asking the companion to connect to `connect_to`, refused before
+        anything is sent when the install can't honour it."""
+        if connect_to is None:
+            return None
+        if not (isinstance(bundle, str) and urllib.parse.urlparse(bundle).scheme):
+            raise IdbException("connect_to applies only to a URL")
+        if not self.companion.install_connect_to:
+            raise IdbException(
+                "This idb_companion does not accept connect_to; update it"
+            )
+        return InstallRequest(
+            connect_to=InstallRequest.ConnectTo(
+                host=connect_to.host, port=connect_to.port
+            )
+        )
+
+    def _streams_zips_as_zstd(
+        self, destination: Destination, compression: Compression
+    ) -> bool:
+        # A companion without `zstd_zip_streams` would extract the stream as a tar.
+        return (
+            destination == InstallRequest.APP
+            and compression == Compression.ZSTD
+            and self.companion.zstd_zip_streams
+        )
 
     @property
     def _is_verbose(self) -> bool:
@@ -504,31 +690,101 @@ class Client(ClientBase):
         target: AccessibilityTarget | None,
         options: AccessibilityInfoOptions,
     ) -> AccessibilityInfo:
-        if options.format is not None:
-            wire_format = options.format.value
-        elif options.nested:
-            wire_format = AccessibilityInfoRequest.NESTED
-        else:
-            wire_format = AccessibilityInfoRequest.LEGACY
-        request = AccessibilityInfoRequest(
-            format=wire_format,
-            keys=options.keys or [],
-            profile=options.profile,
-            collect_frame_coverage=options.collect_frame_coverage,
+        response = await self.stub.accessibility_info(
+            accessibility_info_to_grpc(target, options)
         )
-        # Unset means "unspecified" on the wire: the companion's historical
-        # default backend, and the only thing an older companion understands.
-        if options.backend is not None:
-            request.backend = options.backend.value
-        if isinstance(target, AccessibilityMarker):
-            request.marker = target.value
-            request.match_key = target.match_key.value
-            request.depth = target.depth
-        elif isinstance(target, AccessibilityPoint):
-            request.point.x = target.x
-            request.point.y = target.y
-        response = await self.stub.accessibility_info(request)
         return AccessibilityInfo(json=response.json)
+
+    @log_and_handle_exceptions("accessibility_wait")
+    async def accessibility_wait(
+        self,
+        target: AccessibilityMarker,
+        timeout: float = 10.0,
+        poll_interval: float = 0.5,
+        backend: AccessibilityBackend = AccessibilityBackend.AXBRIDGE,
+    ) -> bool:
+        return (
+            await self._accessibility_wait_result(
+                target=target,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                backend=backend,
+            )
+        ).found
+
+    @log_and_handle_exceptions("accessibility_wait_result")
+    async def accessibility_wait_result(
+        self,
+        target: AccessibilityMarker,
+        timeout: float = 10.0,
+        poll_interval: float = 0.5,
+        backend: AccessibilityBackend = AccessibilityBackend.AXBRIDGE,
+    ) -> AccessibilityWaitResult:
+        return await self._accessibility_wait_result(
+            target=target,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            backend=backend,
+        )
+
+    @log_and_handle_exceptions("accessibility_quiescence")
+    async def accessibility_quiescence(
+        self,
+        pid: int | None = None,
+        bundle_id: str | None = None,
+        busy_threshold_ms: int | None = None,
+        quiet_window_ms: int | None = None,
+    ) -> AsyncGenerator[QuiescenceEvent, None]:
+        request = AccessibilityQuiescenceRequest(
+            pid=pid,
+            bundle_id=bundle_id,
+            busy_threshold_ms=busy_threshold_ms,
+            quiet_window_ms=quiet_window_ms,
+        )
+        async with self.stub.accessibility_quiescence.open() as stream:
+            await stream.send_message(request, end=True)
+            async for response in stream:
+                yield _quiescence_event_from_grpc(response)
+
+    async def _accessibility_wait_result(
+        self,
+        target: AccessibilityMarker,
+        timeout: float,
+        poll_interval: float,
+        backend: AccessibilityBackend,
+    ) -> AccessibilityWaitResult:
+        response = await self.stub.accessibility_action(
+            AccessibilityActionRequest(
+                marker=target.value,
+                match_key=target.match_key.value,
+                depth=target.depth,
+                backend=backend.value,
+                # Deprecated, and still sent: a companion older than the
+                # request-level field reads only this one.
+                wait=AccessibilityActionRequest.Wait(
+                    timeout=timeout, poll_interval=poll_interval, backend=backend.value
+                ),
+            )
+        )
+        wait = response.wait
+        result = wait.result if response.HasField("wait") else response.wait_result
+        if result not in (
+            AccessibilityActionResponse.FOUND,
+            AccessibilityActionResponse.TIMED_OUT,
+        ):
+            raise IdbException("The companion did not report a wait result")
+        diagnostics = None
+        if wait.HasField("diagnostics"):
+            diagnostics = AccessibilitySearchDiagnostics(
+                unmatched_values=list(wait.diagnostics.unmatched_values),
+                truncated=wait.diagnostics.truncated,
+                read_error=wait.diagnostics.read_error or None,
+            )
+        return AccessibilityWaitResult(
+            found=result == AccessibilityActionResponse.FOUND,
+            message=wait.message or None,
+            diagnostics=diagnostics,
+        )
 
     @log_and_handle_exceptions("accessibility_tap")
     async def accessibility_tap(
@@ -536,6 +792,8 @@ class Client(ClientBase):
         target: AccessibilityTarget,
         expected_value: str | None = None,
         expected_key: AccessibilitySearchableKey = AccessibilitySearchableKey.LABEL,
+        ignore_case: bool = False,
+        backend: AccessibilityBackend | None = None,
     ) -> None:
         request = AccessibilityActionRequest(
             tap=AccessibilityActionRequest.Tap(
@@ -551,6 +809,9 @@ class Client(ClientBase):
         elif isinstance(target, AccessibilityPoint):
             request.point.x = target.x
             request.point.y = target.y
+        request.ignore_case = ignore_case
+        if backend is not None:
+            request.backend = backend.value
         await self.stub.accessibility_action(request)
 
     @log_and_handle_exceptions("accessibility_scroll")
@@ -558,6 +819,8 @@ class Client(ClientBase):
         self,
         target: AccessibilityTarget | None,
         direction: AccessibilityScrollDirection,
+        ignore_case: bool = False,
+        backend: AccessibilityBackend | None = None,
     ) -> None:
         request = AccessibilityActionRequest(
             scroll=AccessibilityActionRequest.Scroll(direction=direction.value),
@@ -569,6 +832,9 @@ class Client(ClientBase):
         elif isinstance(target, AccessibilityPoint):
             request.point.x = target.x
             request.point.y = target.y
+        request.ignore_case = ignore_case
+        if backend is not None:
+            request.backend = backend.value
         await self.stub.accessibility_action(request)
 
     @log_and_handle_exceptions("accessibility_set_value")
@@ -576,6 +842,8 @@ class Client(ClientBase):
         self,
         target: AccessibilityTarget,
         value: str,
+        ignore_case: bool = False,
+        backend: AccessibilityBackend | None = None,
     ) -> None:
         request = AccessibilityActionRequest(
             set_value=AccessibilityActionRequest.SetValue(value=value),
@@ -587,6 +855,44 @@ class Client(ClientBase):
         elif isinstance(target, AccessibilityPoint):
             request.point.x = target.x
             request.point.y = target.y
+        request.ignore_case = ignore_case
+        if backend is not None:
+            request.backend = backend.value
+        await self.stub.accessibility_action(request)
+
+    @log_and_handle_exceptions("accessibility_drag")
+    async def accessibility_drag(
+        self,
+        source: AccessibilityTarget,
+        destination: AccessibilityTarget,
+        options: AccessibilityDragOptions,
+        ignore_case: bool = False,
+        backend: AccessibilityBackend | None = None,
+    ) -> None:
+        drag = AccessibilityActionRequest.Drag(
+            press_duration=options.press_duration or 0.0,
+            duration=options.duration or 0.0,
+            release_duration=options.release_duration or 0.0,
+            delta=options.delta or 0.0,
+        )
+        if isinstance(destination, AccessibilityMarker):
+            drag.marker = destination.value
+            drag.destination_match_key = destination.match_key.value
+            drag.destination_depth = destination.depth
+        elif isinstance(destination, AccessibilityPoint):
+            drag.point.x = destination.x
+            drag.point.y = destination.y
+        request = AccessibilityActionRequest(drag=drag)
+        if isinstance(source, AccessibilityMarker):
+            request.marker = source.value
+            request.match_key = source.match_key.value
+            request.depth = source.depth
+        elif isinstance(source, AccessibilityPoint):
+            request.point.x = source.x
+            request.point.y = source.y
+        request.ignore_case = ignore_case
+        if backend is not None:
+            request.backend = backend.value
         await self.stub.accessibility_action(request)
 
     @log_and_handle_exceptions("add_media")
@@ -612,6 +918,63 @@ class Client(ClientBase):
                 await drain_to_stream(
                     stream=stream, generator=generator, logger=self.logger
                 )
+
+    @log_and_handle_exceptions("inject_audio")
+    async def inject_audio(self, audio_file_path: str) -> None:
+        file_path = os.path.realpath(audio_file_path)
+        if not os.path.isfile(file_path):
+            raise IdbException(
+                f"Audio injection input is not a regular file: {file_path}"
+            )
+        async with self.stub.inject_audio.open() as stream:
+            if self.is_local:
+                await stream.send_message(
+                    InjectAudioRequest(payload=Payload(file_path=file_path))
+                )
+                await stream.end()
+                await stream.recv_message()
+                return
+
+            generator = stream_map(
+                _read_audio_chunks(file_path),
+                lambda chunk: InjectAudioRequest(payload=Payload(data=chunk)),
+            )
+            await drain_to_stream(
+                stream=stream, generator=generator, logger=self.logger
+            )
+
+    @log_and_handle_exceptions("inject_video")
+    async def inject_video(
+        self,
+        back_path: str,
+        front_path: str | None,
+        loop: bool,
+        stop: asyncio.Event,
+    ) -> AsyncIterator[list[str]]:
+        if not self.is_local:
+            raise IdbException(
+                "Video injection needs a companion on this host, since the companion reads the video files"
+            )
+        start = InjectVideoRequest.Start(
+            back_path=_video_injection_file(back_path),
+            front_path=_video_injection_file(front_path) if front_path else "",
+            loop=loop,
+        )
+        async with self.stub.inject_video.open() as stream:
+            await stream.send_message(InjectVideoRequest(start=start))
+            async for response in stop_wrapper(stream=stream, stop=stop):
+                yield list(response.processes)
+            if not stop.is_set():
+                # The companion ended the injection. grpclib reads its status, and
+                # with it any error, only once this side has ended too.
+                await stream.end()
+                return
+            await stream.send_message(
+                InjectVideoRequest(stop=InjectVideoRequest.Stop())
+            )
+            await stream.end()
+            while await stream.recv_message() is not None:
+                pass
 
     @log_and_handle_exceptions("approve")
     async def approve(
@@ -664,10 +1027,28 @@ class Client(ClientBase):
     async def photos_clear(self) -> None:
         await self.stub.photos_clear(PhotosClearRequest())
 
+    async def _lock_screen(self, action: LockScreenRequest.Action) -> LockState:
+        response = await self.stub.lock_screen(LockScreenRequest(action=action))
+        return LockState(locked=response.locked)
+
+    @log_and_handle_exceptions("lock_screen")
+    async def lock_state(self) -> LockState:
+        return await self._lock_screen(LockScreenRequest.STATE)
+
+    @log_and_handle_exceptions("lock_screen")
+    async def lock(self) -> LockState:
+        return await self._lock_screen(LockScreenRequest.LOCK)
+
+    @log_and_handle_exceptions("lock_screen")
+    async def unlock(self) -> LockState:
+        return await self._lock_screen(LockScreenRequest.UNLOCK)
+
     @log_and_handle_exceptions("screenshot")
-    async def screenshot(self) -> bytes:
-        response = await self.stub.screenshot(ScreenshotRequest())
-        return response.image_data
+    async def screenshot(
+        self, options: ScreenshotOptions = DEFAULT_SCREENSHOT_OPTIONS
+    ) -> Screenshot:
+        response = await self.stub.screenshot(screenshot_to_grpc(options))
+        return screenshot_from_grpc(options, response)
 
     @log_and_handle_exceptions("set_location")
     async def set_location(self, latitude: float, longitude: float) -> None:
@@ -690,6 +1071,32 @@ class Client(ClientBase):
             )
         )
 
+    @log_and_handle_exceptions("delivered_notifications")
+    async def delivered_notifications(
+        self, bundle_id: str
+    ) -> list[DeliveredNotification]:
+        response = await self.stub.delivered_notifications(
+            DeliveredNotificationsRequest(bundle_id=bundle_id)
+        )
+        return [
+            DeliveredNotification(
+                bundle_id=notification.bundle_id,
+                identifier=notification.identifier,
+                title=notification.title,
+                subtitle=notification.subtitle,
+                body=notification.body,
+                thread_identifier=notification.thread_identifier,
+                date=notification.date if notification.HasField("date") else None,
+            )
+            for notification in response.notifications
+        ]
+
+    @log_and_handle_exceptions("clear_delivered_notifications")
+    async def clear_delivered_notifications(self, bundle_id: str) -> None:
+        await self.stub.clear_delivered_notifications(
+            ClearDeliveredNotificationsRequest(bundle_id=bundle_id)
+        )
+
     @log_and_handle_exceptions("terminate")
     async def terminate(self, bundle_id: str) -> None:
         await self.stub.terminate(TerminateRequest(bundle_id=bundle_id))
@@ -708,6 +1115,8 @@ class Client(ClientBase):
                 udid=target.udid,
                 is_local=self.is_local,
                 pid=None,
+                supported_compressions=self.companion.supported_compressions,
+                install_connect_to=self.companion.install_connect_to,
             ),
             # Extract the companion metadata from the response.
             metadata=response.companion.metadata,
@@ -773,12 +1182,12 @@ class Client(ClientBase):
 
     @log_and_handle_exceptions("crash_delete")
     async def crash_delete(self, query: CrashLogQuery) -> list[CrashLogInfo]:
-        response = await self.stub.crash_delete(_to_crash_log_query_proto(query))
+        response = await self.stub.crash_delete(crash_log_query_to_grpc(query))
         return _to_crash_log_info_list(response)
 
     @log_and_handle_exceptions("crash_list")
     async def crash_list(self, query: CrashLogQuery) -> list[CrashLogInfo]:
-        response = await self.stub.crash_list(_to_crash_log_query_proto(query))
+        response = await self.stub.crash_list(crash_log_query_to_grpc(query))
         return _to_crash_log_info_list(response)
 
     @log_and_handle_exceptions("crash_show")
@@ -793,6 +1202,9 @@ class Client(ClientBase):
         compression: Compression | None = None,
         make_debuggable: bool | None = None,
         override_modification_time: bool | None = None,
+        *,
+        connect_to: TCPAddress | None = None,
+        on_upload_progress: Callable[[str], None] | None = None,
     ) -> AsyncIterator[InstalledArtifact]:
         async for response in self._install_to_destination(
             bundle=bundle,
@@ -802,6 +1214,8 @@ class Client(ClientBase):
             bundle_id=None,
             bundle_type=None,
             override_modification_time=override_modification_time,
+            connect_to=connect_to,
+            on_upload_progress=on_upload_progress,
         ):
             yield response
 
@@ -810,6 +1224,8 @@ class Client(ClientBase):
         self,
         xctest: Bundle,
         skip_signing_bundles: bool | None = None,
+        *,
+        on_upload_progress: Callable[[str], None] | None = None,
     ) -> AsyncIterator[InstalledArtifact]:
         async for response in self._install_to_destination(
             bundle=xctest,
@@ -819,11 +1235,17 @@ class Client(ClientBase):
             bundle_id=None,
             bundle_type=None,
             skip_signing_bundles=skip_signing_bundles,
+            on_upload_progress=on_upload_progress,
         ):
             yield response
 
     @log_and_handle_exceptions("install")
-    async def install_dylib(self, dylib: Bundle) -> AsyncIterator[InstalledArtifact]:
+    async def install_dylib(
+        self,
+        dylib: Bundle,
+        *,
+        on_upload_progress: Callable[[str], None] | None = None,
+    ) -> AsyncIterator[InstalledArtifact]:
         async for response in self._install_to_destination(
             bundle=dylib,
             destination=InstallRequest.DYLIB,
@@ -831,6 +1253,7 @@ class Client(ClientBase):
             make_debuggable=None,
             bundle_id=None,
             bundle_type=None,
+            on_upload_progress=on_upload_progress,
         ):
             yield response
 
@@ -841,6 +1264,8 @@ class Client(ClientBase):
         bundle_id: str | None,
         compression: Compression | None,
         bundle_type: FileContainerType | None = None,
+        *,
+        on_upload_progress: Callable[[str], None] | None = None,
     ) -> AsyncIterator[InstalledArtifact]:
         async for response in self._install_to_destination(
             bundle=dsym,
@@ -849,12 +1274,16 @@ class Client(ClientBase):
             make_debuggable=None,
             bundle_id=bundle_id,
             bundle_type=bundle_type,
+            on_upload_progress=on_upload_progress,
         ):
             yield response
 
     @log_and_handle_exceptions("install")
     async def install_framework(
-        self, framework_path: Bundle
+        self,
+        framework_path: Bundle,
+        *,
+        on_upload_progress: Callable[[str], None] | None = None,
     ) -> AsyncIterator[InstalledArtifact]:
         async for response in self._install_to_destination(
             bundle=framework_path,
@@ -863,6 +1292,7 @@ class Client(ClientBase):
             make_debuggable=None,
             bundle_id=None,
             bundle_type=None,
+            on_upload_progress=on_upload_progress,
         ):
             yield response
 
@@ -890,7 +1320,12 @@ class Client(ClientBase):
                 await stream.end()
                 await stream.recv_message()
             else:
+                compression = select_stream_compression(
+                    requested=compression,
+                    supported=self.companion.supported_compressions,
+                )
                 if compression is not None:
+                    self.logger.debug(f"Pushing with {compression.name} compression")
                     await stream.send_message(
                         PushRequest(
                             payload=Payload(compression=COMPRESSION_MAP[compression])
@@ -991,9 +1426,36 @@ class Client(ClientBase):
     ) -> None:
         await self.send_events(button_press_to_events(button_type, duration))
 
+    @log_and_handle_exceptions("get_orientation")
+    async def get_orientation(self) -> DeviceOrientation:
+        response = await self.stub.get_orientation(GetOrientationRequest())
+        try:
+            return DeviceOrientation[
+                GetOrientationResponse.Orientation.Name(response.orientation)
+            ]
+        except (ValueError, KeyError) as error:
+            raise IdbException(
+                f"Unrecognized device orientation: {response.orientation}"
+            ) from error
+
+    @log_and_handle_exceptions("set_orientation")
+    async def set_orientation(self, orientation: HIDOrientationType) -> None:
+        await self.stub.set_orientation(
+            SetOrientationRequest(orientation=orientation.value)
+        )
+
     @log_and_handle_exceptions("hid")
     async def rotate(self, orientation: HIDOrientationType) -> None:
         await self.send_events(rotate_to_events(orientation))
+
+    @log_and_handle_exceptions("hinge_angle")
+    async def get_hinge_angle(self) -> float:
+        response = await self.stub.hinge_angle(HingeAngleRequest())
+        return response.angle
+
+    @log_and_handle_exceptions("hid")
+    async def set_hinge_angle(self, angle: float) -> None:
+        await self.send_events([HIDHinge(angle=angle)])
 
     @log_and_handle_exceptions("hid")
     async def shake(self) -> None:
@@ -1086,87 +1548,6 @@ class Client(ClientBase):
         commands = response.status.lldb_bootstrap_commands
         return commands if commands else None
 
-    @log_and_handle_exceptions("instruments_run")
-    async def run_instruments(
-        self,
-        stop: asyncio.Event,
-        trace_basename: str,
-        template_name: str,
-        app_bundle_id: str,
-        app_environment: dict[str, str] | None = None,
-        app_arguments: list[str] | None = None,
-        tool_arguments: list[str] | None = None,
-        started: asyncio.Event | None = None,
-        timings: InstrumentsTimings | None = None,
-        post_process_arguments: list[str] | None = None,
-    ) -> list[str]:
-        self.logger.info("Starting instruments connection")
-        async with self.stub.instruments_run.open() as stream:
-            self.logger.info("Sending instruments request")
-            await stream.send_message(
-                InstrumentsRunRequest(
-                    start=InstrumentsRunRequest.Start(
-                        template_name=template_name,
-                        app_bundle_id=app_bundle_id,
-                        environment=app_environment,
-                        arguments=app_arguments,
-                        tool_arguments=tool_arguments,
-                        timings=translate_instruments_timings(timings),
-                    )
-                )
-            )
-            self.logger.info("Starting instruments")
-            await instruments_drain_until_running(stream=stream, logger=self.logger)
-            if started:
-                started.set()
-            self.logger.info("Instruments has started, waiting for stop")
-            async for response in stop_wrapper(stream=stream, stop=stop):
-                output = response.log_output
-                if len(output):
-                    self.logger.info(output.decode())
-            self.logger.info("Stopping instruments")
-            await stream.send_message(
-                InstrumentsRunRequest(
-                    stop=InstrumentsRunRequest.Stop(
-                        post_process_arguments=post_process_arguments
-                    )
-                )
-            )
-            await stream.end()
-
-            result = []
-
-            with tempfile.TemporaryDirectory() as tmp_trace_dir:
-                self.logger.info(
-                    f"Writing instruments data from tar to {tmp_trace_dir}"
-                )
-                await drain_untar(
-                    instruments_generate_bytes(stream=stream, logger=self.logger),
-                    output_path=tmp_trace_dir,
-                )
-
-                if os.path.exists(
-                    os.path.join(os.path.abspath(tmp_trace_dir), "instrument_data")
-                ):
-                    # tar is an instruments trace (old behavior)
-                    trace_file = f"{trace_basename}.trace"
-                    shutil.copytree(tmp_trace_dir, trace_file)
-                    result.append(trace_file)
-                    self.logger.info(f"Trace written to {trace_file}")
-                else:
-                    # tar is a folder containing one or more trace files
-                    for file in os.listdir(tmp_trace_dir):
-                        _, file_extension = os.path.splitext(file)
-                        tmp_trace_file = os.path.join(
-                            os.path.abspath(tmp_trace_dir), file
-                        )
-                        trace_file = f"{trace_basename}{file_extension}"
-                        shutil.move(tmp_trace_file, trace_file)
-                        result.append(trace_file)
-                        self.logger.info(f"Trace written to {trace_file}")
-
-            return result
-
     @log_and_handle_exceptions("launch")
     async def launch(
         self,
@@ -1193,44 +1574,86 @@ class Client(ClientBase):
             )
             await stream.send_message(request)
             if stop:
-                await asyncio.gather(
-                    drain_launch_stream(stream, pid_file),
-                    end_launch_stream(stream, stop),
-                )
+                await wait_for_launch_stream(stream, stop, pid_file)
             else:
                 await stream.end()
                 await drain_launch_stream(stream, pid_file)
 
     @log_and_handle_exceptions("record")
-    async def record_video(self, stop: asyncio.Event, output_file: str) -> None:
+    async def record_video(
+        self,
+        stop: asyncio.Event,
+        output_file: str,
+        fps: int | None = None,
+        scale_factor: float | None = None,
+        bitrate: float | None = None,
+        key_frame_rate: float | None = None,
+        audio: bool = False,
+    ) -> RecordedAudio | None:
         self.logger.info("Starting connection to backend")
+        requested_encode_options = any([fps, scale_factor, bitrate, key_frame_rate])
+        applied: list[RecordResponse.Applied] = []
+        recorded_audio: list[RecordResponse.Audio] = []
         async with self.stub.record.open() as stream:
             if self.is_local:
                 self.logger.info(
                     f"Starting video recording to local file {output_file}"
                 )
-                await stream.send_message(
-                    RecordRequest(start=RecordRequest.Start(file_path=output_file))
-                )
+                file_path = output_file
             else:
                 self.logger.info("Starting video recording with response data")
-                await stream.send_message(
-                    # pyre-ignore
-                    RecordRequest(start=RecordRequest.Start(file_path=None))
+                file_path = None
+            await stream.send_message(
+                RecordRequest(
+                    start=RecordRequest.Start(
+                        # pyre-ignore
+                        file_path=file_path,
+                        # Zero is how the wire says "unset", and each has a companion-side default.
+                        fps=fps or 0,
+                        scale_factor=scale_factor or 0,
+                        avg_bitrate=bitrate or 0,
+                        key_frame_rate=key_frame_rate or 0,
+                        audio=audio,
+                    )
                 )
+            )
             await stop.wait()
             self.logger.info("Stopping video recording")
             await stream.send_message(RecordRequest(stop=RecordRequest.Stop()))
             await stream.end()
             if self.is_local:
                 self.logger.info("Video saved at output path")
-                await stream.recv_message()
+                # The echo of the encode options and the description of the audio, when there are
+                # any, precede the file path.
+                while True:
+                    response = await stream.recv_message()
+                    output = response.WhichOneof("output") if response else None
+                    if output == "applied":
+                        applied.append(response.applied)
+                    elif output == "audio":
+                        recorded_audio.append(response.audio)
+                    else:
+                        break
             else:
                 self.logger.info(f"Decompressing gzip to {output_file}")
                 await drain_gzip_decompress(
-                    generate_video_bytes(stream), output_path=output_file
+                    generate_video_bytes(stream, applied, recorded_audio),
+                    output_path=output_file,
                 )
                 self.logger.info(f"Finished decompression to {output_file}")
+        if requested_encode_options and not applied:
+            self.logger.warning(
+                "The companion did not report which encode options it applied, so it predates them "
+                "and recorded at its own defaults"
+            )
+        if not audio:
+            return None
+        if not any(echo.audio for echo in applied) or not recorded_audio:
+            raise IdbException(
+                f"The companion recorded no audio: it predates audio recording, so {output_file} "
+                "holds video alone"
+            )
+        return recorded_audio_from_grpc(recorded_audio[0])
 
     @log_and_handle_exceptions("video_stream")
     async def stream_video(
@@ -1345,6 +1768,7 @@ class Client(ClientBase):
         coverage_format: CodeCoverageFormat = CodeCoverageFormat.EXPORTED,
         log_directory_path: str | None = None,
         wait_for_debugger: bool = False,
+        randomize_execution_order: bool = False,
     ) -> AsyncIterator[TestRunInfo]:
         async with self.stub.xctest_run.open() as stream:
             request = make_request(
@@ -1371,6 +1795,7 @@ class Client(ClientBase):
                 collect_logs=log_directory_path is not None,
                 wait_for_debugger=wait_for_debugger,
                 collect_result_bundle=result_bundle_path is not None,
+                randomize_execution_order=randomize_execution_order,
             )
             log_parser = XCTestLogParser()
             await stream.send_message(request)
@@ -1471,6 +1896,36 @@ class Client(ClientBase):
             )
         )
         return list(response.values)
+
+    @log_and_handle_exceptions("profile")
+    async def profile(
+        self,
+        kind: ProfileKind,
+        target: ProfileTarget,
+        stop: asyncio.Event,
+        artifact_path: str | None = None,
+        on_sample: Callable[[dict[str, object]], None] | None = None,
+    ) -> ProfileResult:
+        stoppable = accepts_stop(kind)
+        async with self.stub.profile.open() as stream:
+            await stream.send_message(
+                start_request(kind, target, include_artifact=artifact_path is not None),
+                end=not stoppable,
+            )
+            result = await drain_profile(
+                stream, stop=stop if stoppable else None, on_sample=on_sample
+            )
+            if result is not None and artifact_path is not None:
+                await drain_artifact(stream, artifact_path)
+        if result is None:
+            raise ProfileException("The companion ended the profile without a result")
+        return ProfileResult(
+            report=(
+                message_to_json(result.report) if result.HasField("report") else None
+            ),
+            tool_output=result.tool_output,
+            artifact=artifact_path,
+        )
 
     @log_and_handle_exceptions("xctrace_record")
     async def xctrace_record(
@@ -1578,6 +2033,15 @@ class Client(ClientBase):
                         self.logger.info(f"Trace written to {trace_file}")
 
             return result
+
+    @log_and_handle_exceptions("forward_port")
+    async def forward_port(
+        self,
+        device_port: int,
+        input_stream: StreamReader,
+        output_stream: StreamWriter,
+    ) -> None:
+        await forward_port(self.stub, device_port, input_stream, output_stream)
 
     @log_and_handle_exceptions("dap")
     async def dap(

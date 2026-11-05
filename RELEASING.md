@@ -29,8 +29,11 @@ adds the module directory itself; expect BCR maintainer review.
    - Update the local checkout, re-apply/extend the patch, and rebuild per
      [docs/BUILDING_IDB.md](docs/BUILDING_IDB.md).
    - Re-vendor the python client if `idb/` or `proto/idb.proto` changed:
-     copy `idb/` into `third_party/idb_client/`, regenerate
-     `idb_pb2.py`/`idb_grpc.py`, keep the `python/migrations` shim.
+     install it from the patched tree and copy the installed package (with
+     its generated `idb_pb2.py`/`idb_grpc.py`) into `third_party/idb_client/`,
+     per docs/BUILDING_IDB.md.
+   - Drop from the patch any fix the new upstream release includes; when
+     none are left, switch to upstream's published companion and client.
    - Run the full example suite and the benchmark.
 2. Tag and create the GitHub release **with the companion artifact
    attached** before landing any commit that references it — CI fetches the

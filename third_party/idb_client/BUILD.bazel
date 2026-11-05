@@ -1,9 +1,9 @@
 # Vendored fb-idb python client (MIT licensed, see LICENSE).
 #
-# Source: https://github.com/facebook/idb at the commit recorded in
-# //docs:BUILDING_IDB.md. The gRPC files (idb/grpc/idb_pb2.py,
-# idb/grpc/idb_grpc.py) are pre-generated from proto/idb.proto;
-# python/migrations is a shim for a Meta-internal module.
+# Source: https://github.com/facebook/idb at the release recorded in
+# //docs:BUILDING_IDB.md, with patches/idb-build-fixes.patch applied. The
+# gRPC files (idb/grpc/idb_pb2.py, idb/grpc/idb_grpc.py) are generated from
+# proto/idb.proto by the package's own build (`pip install .`).
 
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
@@ -11,17 +11,12 @@ load("@rules_python//python:py_library.bzl", "py_library")
 py_library(
     name = "idb_client_lib",
     visibility = ["//visibility:public"],
-    srcs = glob([
-        "idb/**/*.py",
-        "python/**/*.py",
-    ]),
+    srcs = glob(["idb/**/*.py"]),
     imports = ["."],
     deps = [
         "@rules_idb_pip//aiofiles",
         "@rules_idb_pip//grpclib",
         "@rules_idb_pip//protobuf",
-        "@rules_idb_pip//pyre_extensions",
-        "@rules_idb_pip//treelib",
     ],
 )
 

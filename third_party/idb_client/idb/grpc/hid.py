@@ -4,7 +4,6 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 from typing import List, Tuple, TypeVar
 
@@ -14,6 +13,7 @@ from idb.common.types import (
     HIDDelay,
     HIDDirection,
     HIDEvent,
+    HIDHinge,
     HIDKey,
     HIDOrientation,
     HIDOrientationType,
@@ -30,6 +30,7 @@ from idb.grpc.idb_pb2 import HIDEvent as GrpcHIDEvent, Point as GrpcPoint
 
 GrpcHIDButton = GrpcHIDEvent.HIDButton
 GrpcHIDDelay = GrpcHIDEvent.HIDDelay
+GrpcHIDHinge = GrpcHIDEvent.HIDHinge
 GrpcHIDKey = GrpcHIDEvent.HIDKey
 GrpcHIDPinch = GrpcHIDEvent.HIDPinch
 GrpcHIDPress = GrpcHIDEvent.HIDPress
@@ -51,6 +52,10 @@ BUTTON_TYPE_PAIRS: "List[Tuple[HIDButtonType, GrpcHIDButtonType]]" = [
     (HIDButtonType.LOCK, GrpcHIDEvent.LOCK),
     (HIDButtonType.SIDE_BUTTON, GrpcHIDEvent.SIDE_BUTTON),
     (HIDButtonType.SIRI, GrpcHIDEvent.SIRI),
+    (HIDButtonType.PLAY_PAUSE, GrpcHIDEvent.PLAY_PAUSE),
+    (HIDButtonType.VOLUME_UP, GrpcHIDEvent.VOLUME_UP),
+    (HIDButtonType.VOLUME_DOWN, GrpcHIDEvent.VOLUME_DOWN),
+    (HIDButtonType.EJECT, GrpcHIDEvent.EJECT),
 ]
 
 DIRECTION_PAIRS: "List[Tuple[HIDDirection, GrpcHIDDirection]]" = [
@@ -67,7 +72,7 @@ ORIENTATION_TYPE_PAIRS: "List[Tuple[HIDOrientationType, GrpcHIDOrientationType]]
 
 
 def _translation_from_pairs(pairs: list[tuple[_A, _B]], item: _A) -> _B:
-    pair_map = {py: grpc for (py, grpc) in pairs}
+    pair_map = dict(pairs)
     return pair_map[item]
 
 
@@ -164,6 +169,8 @@ def event_to_grpc(event: HIDEvent) -> GrpcHIDEvent:
         return GrpcHIDEvent(pinch=pinch_to_grpc(event))
     elif isinstance(event, HIDOrientation):
         return GrpcHIDEvent(orientation=orientation_to_grpc(event))
+    elif isinstance(event, HIDHinge):
+        return GrpcHIDEvent(hinge=GrpcHIDHinge(angle=event.angle))
     elif isinstance(event, HIDShake):
         return GrpcHIDEvent(shake=shake_to_grpc(event))
     else:

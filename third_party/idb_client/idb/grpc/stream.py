@@ -4,12 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 import asyncio
 from collections.abc import AsyncIterator
 from logging import Logger
-from typing import Dict, Generic, Optional, TypeVar
+from typing import Generic, TypeVar
 
 from idb.utils.typing import none_throws
 

@@ -4,16 +4,16 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
+import asyncio
 import functools
 import inspect
 import logging
 import time
+from asyncio import CancelledError
 from collections.abc import Sequence
-from concurrent.futures import CancelledError
 from types import TracebackType
-from typing import Any, AsyncContextManager, Optional, Tuple, Type
+from typing import Any, AsyncContextManager
 
 import idb.common.plugin as plugin
 from idb.common.types import LoggingMetadata
@@ -22,16 +22,24 @@ from idb.utils.typing import none_throws
 
 logger: logging.Logger = logging.getLogger("idb")
 
+# A cancelled asyncio task raises asyncio.CancelledError, which is not related
+# to concurrent.futures.CancelledError and does not subclass Exception.
+_CANCELLATIONS = (asyncio.CancelledError, CancelledError)
+
+
+def _monotonic() -> float:
+    return time.monotonic()
+
 
 def _initial_info(
     args: Sequence[object], metadata: LoggingMetadata | None
-) -> tuple[LoggingMetadata, int]:
-    _metadata: LoggingMetadata = metadata or {}
+) -> tuple[LoggingMetadata, float]:
+    _metadata: LoggingMetadata = dict(metadata or {})
     if len(args):
         self_meta: LoggingMetadata | None = getattr(args[0], "metadata", None)
         if self_meta:
             _metadata.update(self_meta)
-    start = int(time.time())
+    start = _monotonic()
     return (_metadata, start)
 
 
@@ -41,12 +49,12 @@ class log_call(AsyncContextManager[None]):
     ) -> None:
         self.name = name
         self.metadata: LoggingMetadata = metadata or {}
-        self.start: int | None = None
+        self.start: float | None = None
 
     async def __aenter__(self) -> None:
         name = none_throws(self.name)
         logger.debug(f"{self.name} called")
-        self.start = int(time.time())
+        self.start = _monotonic()
         await plugin.before_invocation(name=name, metadata=self.metadata)
 
     async def __aexit__(
@@ -56,8 +64,15 @@ class log_call(AsyncContextManager[None]):
         traceback: TracebackType | None,
     ) -> bool:
         name = none_throws(self.name)
-        duration = int((time.time() - none_throws(self.start)) * 1000)
-        if exception:
+        duration = int((_monotonic() - none_throws(self.start)) * 1000)
+        if isinstance(exception, _CANCELLATIONS):
+            logger.debug(f"{name} cancelled")
+            await plugin.after_invocation(
+                name=name,
+                duration=duration,
+                metadata={**self.metadata, "cancelled": True},
+            )
+        elif exception:
             logger.debug(f"{name} failed")
             await plugin.failed_invocation(
                 name=name,
@@ -87,22 +102,19 @@ class log_call(AsyncContextManager[None]):
                     name=_name, result=value, metadata=_metadata
                 )
                 if result_metadata:
-                    # Merge into a copy: _metadata may alias the decorator's
-                    # dict, which is shared across invocations of the same
-                    # function, and result tags belong to this one only.
                     _metadata = {**_metadata, **result_metadata}
                 await plugin.after_invocation(
                     name=_name,
-                    duration=int((time.time() - start) * 1000),
+                    duration=int((_monotonic() - start) * 1000),
                     metadata=_metadata,
                 )
                 return value
-            except CancelledError as ex:
+            except _CANCELLATIONS as ex:
                 logger.debug(f"{_name} cancelled")
                 _metadata["cancelled"] = True
                 await plugin.after_invocation(
                     name=_name,
-                    duration=int((time.time() - start) * 1000),
+                    duration=int((_monotonic() - start) * 1000),
                     metadata=_metadata,
                 )
                 raise ex
@@ -110,7 +122,7 @@ class log_call(AsyncContextManager[None]):
                 logger.debug(f"{_name} failed")
                 await plugin.failed_invocation(
                     name=_name,
-                    duration=int((time.time() - start) * 1000),
+                    duration=int((_monotonic() - start) * 1000),
                     exception=ex,
                     metadata=_metadata,
                 )
@@ -127,15 +139,15 @@ class log_call(AsyncContextManager[None]):
                 logger.debug(f"{_name} finished")
                 await plugin.after_invocation(
                     name=_name,
-                    duration=int((time.time() - start) * 1000),
+                    duration=int((_monotonic() - start) * 1000),
                     metadata=_metadata,
                 )
-            except CancelledError as ex:
+            except _CANCELLATIONS as ex:
                 logger.debug(f"{_name} cancelled")
                 _metadata["cancelled"] = True
                 await plugin.after_invocation(
                     name=_name,
-                    duration=int((time.time() - start) * 1000),
+                    duration=int((_monotonic() - start) * 1000),
                     metadata=_metadata,
                 )
                 raise ex
@@ -143,7 +155,7 @@ class log_call(AsyncContextManager[None]):
                 logger.debug(f"{_name} failed")
                 await plugin.failed_invocation(
                     name=_name,
-                    duration=int((time.time() - start) * 1000),
+                    duration=int((_monotonic() - start) * 1000),
                     exception=ex,
                     metadata=_metadata,
                 )

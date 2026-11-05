@@ -4,16 +4,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 import json
 import os.path
 import sys
 from argparse import ArgumentParser, Namespace, REMAINDER
 from pathlib import Path
-from typing import Optional, Set
 
-from idb.cli import ClientCommand
+from idb.cli import ClientCommand, print_upload_progress
 from idb.common.command import CommandGroup
 from idb.common.format import (
     human_format_installed_test_info,
@@ -51,10 +49,12 @@ class XctestInstallCommand(ClientCommand):
 
     async def run_with_client(self, args: Namespace, client: Client) -> None:
         async for install_response in client.install_xctest(
-            args.test_bundle_path, args.skip_signing_bundles
+            args.test_bundle_path,
+            args.skip_signing_bundles,
+            on_upload_progress=print_upload_progress,
         ):
             if install_response.progress != 0.0 and not args.json:
-                print("Installed {install_response.progress}%")
+                print(f"Installed {install_response.progress}%")
             elif args.json:
                 print(
                     json.dumps(
@@ -129,7 +129,9 @@ class XctestListTestsCommand(ClientCommand):
             print("\n".join(tests))
 
     async def install_bundles(self, args: Namespace, client: Client) -> None:
-        async for test in client.install_xctest(args.test_bundle_id):
+        async for test in client.install_xctest(
+            args.test_bundle_id, on_upload_progress=print_upload_progress
+        ):
             args.test_bundle_id = test.name
 
 
@@ -206,6 +208,11 @@ class CommonRunXcTestCommand(ClientCommand):
             help="Suspend test run process to wait for a debugger to be attached. (It is NOT supported by ui test).",
         )
         parser.add_argument(
+            "--randomize-execution-order",
+            action="store_true",
+            help="Run the tests in a random order instead of the default lexical one. (It is NOT supported by logic tests).",
+        )
+        parser.add_argument(
             "--install",
             help="When this option is provided bundle_ids are assumed "
             "to be paths instead. They are installed before running.",
@@ -263,6 +270,12 @@ class CommonRunXcTestCommand(ClientCommand):
             print(
                 "--wait_for_debugger flag is NOT supported for ui tests. It will default to False"
             )
+        randomize_execution_order = args.randomize_execution_order
+        if randomize_execution_order and is_logic:
+            print(
+                "--randomize-execution-order flag is NOT supported for logic tests. It will default to False"
+            )
+            randomize_execution_order = False
 
         formatter = json_format_test_info if args.json else human_format_test_info
         coverage_format = CodeCoverageFormat[args.coverage_format]
@@ -288,12 +301,15 @@ class CommonRunXcTestCommand(ClientCommand):
             coverage_format=coverage_format,
             log_directory_path=args.log_directory_path,
             wait_for_debugger=args.wait_for_debugger,
+            randomize_execution_order=randomize_execution_order,
         ):
             print(formatter(test_result))
 
     async def install_bundles(self, args: Namespace, client: Client) -> None:
         async for test in client.install_xctest(
-            args.test_bundle_id, args.skip_signing_bundles
+            args.test_bundle_id,
+            args.skip_signing_bundles,
+            on_upload_progress=print_upload_progress,
         ):
             args.test_bundle_id = test.name
 
@@ -317,6 +333,7 @@ class CommonRunXcTestCommand(ClientCommand):
             bundle_id=args.test_bundle_id,
             bundle_type=FileContainerType.XCTEST,
             compression=None,
+            on_upload_progress=print_upload_progress,
         ):
             if install_response.progress == 0.0:
                 dsym_name = install_response.name
@@ -365,7 +382,9 @@ class XctestRunAppCommand(CommonRunXcTestCommand):
 
     async def install_bundles(self, args: Namespace, client: Client) -> None:
         await super().install_bundles(args, client)
-        async for app in client.install(args.app_bundle_id):
+        async for app in client.install(
+            args.app_bundle_id, on_upload_progress=print_upload_progress
+        ):
             args.app_bundle_id = app.name
 
     def get_tests_to_run(self, args: Namespace) -> set[str] | None:
@@ -390,7 +409,9 @@ class XctestRunUICommand(XctestRunAppCommand):
 
     async def install_bundles(self, args: Namespace, client: Client) -> None:
         await super().install_bundles(args, client)
-        async for app in client.install(args.test_host_app_bundle_id):
+        async for app in client.install(
+            args.test_host_app_bundle_id, on_upload_progress=print_upload_progress
+        ):
             args.test_host_app_bundle_id = app.name
 
 
@@ -430,15 +451,28 @@ class XctestRunLogicCommand(CommonRunXcTestCommand):
         return None
 
 
-XctestRunCommand = CommandGroup(
-    name="run",
-    description=(
-        "Run an installed xctest. Any environment variables of the form IDB_X\n"
-        " will be passed through with the IDB_ prefix removed."
-    ),
-    commands=[
-        XctestRunAppCommand(),
-        XctestRunUICommand(),
-        XctestRunLogicCommand(),
-    ],
-)
+def build_xctest_run_command() -> CommandGroup:
+    """A freshly constructed ``xctest run`` group.
+
+    A group is mutable: adding it to a parser records that parser on it and
+    memoises its subcommand lookup. One instance shared between two command
+    graphs would therefore have the second graph's state overwrite the
+    first's, so every graph builds its own.
+    """
+    return CommandGroup(
+        name="run",
+        description=(
+            "Run an installed xctest. Any environment variables of the form IDB_X\n"
+            " will be passed through with the IDB_ prefix removed."
+        ),
+        commands=[
+            XctestRunAppCommand(),
+            XctestRunUICommand(),
+            XctestRunLogicCommand(),
+        ],
+    )
+
+
+# Kept for callers that already import this name. The command graph builds its
+# own group with the factory above rather than sharing this one.
+XctestRunCommand: CommandGroup = build_xctest_run_command()

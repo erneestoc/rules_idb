@@ -1033,12 +1033,6 @@ done
 set +f
 IFS=$saved_IFS
 
-# Random test ordering: the (patched) companion reads this key out of the
-# launch environment and sets XCTestConfiguration.testExecutionOrdering.
-if [[ "$random_order" == true ]]; then
-  export IDB_FB_XCTEST_EXECUTION_ORDERING=random
-fi
-
 # Sanitizer runtimes and the Main Thread Checker ship inside the test
 # bundle's Frameworks directory when enabled; they must be present in
 # DYLD_INSERT_LIBRARIES of the host process. The (patched) companion appends
@@ -1453,6 +1447,11 @@ else
   idb_cmd+=("logic")
 fi
 idb_cmd+=("--json")
+
+# Logic tests are rejected above: they do not go through XCTestConfiguration.
+if [[ "$random_order" == true ]]; then
+  idb_cmd+=("--randomize-execution-order")
+fi
 
 # Attachments and result bundles are opt-in: recording activities and building
 # an .xcresult makes the companion buffer attachment payloads, forfeiting most

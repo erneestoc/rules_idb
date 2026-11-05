@@ -4,13 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 import asyncio
 import logging
 from asyncio import StreamReader, StreamWriter
 from collections.abc import AsyncGenerator
-from typing import Optional
 
 from idb.common.types import IdbException
 from idb.grpc.idb_grpc import CompanionServiceStub

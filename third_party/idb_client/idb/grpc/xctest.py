@@ -4,13 +4,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 import os
 import plistlib
 from enum import Enum
 from logging import Logger
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 from idb.common.tar import untar
 from idb.common.types import (
@@ -116,6 +115,7 @@ def make_request(
     collect_logs: bool,
     wait_for_debugger: bool,
     collect_result_bundle: bool,
+    randomize_execution_order: bool = False,
 ) -> XctestRunRequest:
     if is_logic_test:
         mode = Mode(logic=Logic())
@@ -153,6 +153,7 @@ def make_request(
         wait_for_debugger=wait_for_debugger,
         code_coverage=coverage_object,
         collect_result_bundle=collect_result_bundle,
+        randomize_execution_order=randomize_execution_order,
     )
 
 

@@ -4,13 +4,11 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 import json
 import os
 from argparse import ArgumentParser, Namespace, SUPPRESS
 from collections.abc import Mapping
-from typing import Union
 
 from idb.cli import ClientCommand, CompanionCommand, ManagementCommand
 from idb.common.format import human_format_target_info, json_format_target_info

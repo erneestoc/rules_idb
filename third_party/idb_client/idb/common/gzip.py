@@ -4,8 +4,6 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
-
 
 import asyncio
 import sys
@@ -52,6 +50,11 @@ async def drain_gzip_decompress(stream: AsyncIterator[bytes], output_path: str) 
             await writer.drain()
         writer.write_eof()
         await writer.drain()
+        # gunzip is still writing output_path after its stdin closes, and the last bytes it was
+        # sent only reach it if the event loop outlives the pipe transport's buffer.
+        returncode = await process.wait()
+    if returncode != 0:
+        raise OSError(f"gunzip exited with {returncode} decompressing to {output_path}")
 
 
 async def generate_gzip(path: str) -> AsyncIterator[bytes]:

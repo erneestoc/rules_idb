@@ -100,7 +100,7 @@ Or use the predefined `@rules_idb//idb:default_runner`. For coverage, add
 Just Xcode. Nothing to `brew install`, no python setup, no PATH plumbing:
 
 * the **idb python client** is vendored in this repository
-  (`third_party/idb_client`, pinned facebook/idb commit) and runs on a
+  (`third_party/idb_client`, pinned facebook/idb release) and runs on a
   hermetic python 3.12 toolchain via rules_python;
 * the **`idb_companion` binary** (plus simulator shims) is prebuilt by this
   repository's [release pipeline](.github/workflows/build-idb-dist.yml)
@@ -109,11 +109,13 @@ Just Xcode. Nothing to `brew install`, no python setup, no PATH plumbing:
   idb commit, patch, and Xcode version it was built and verified with (see
   [RELEASING.md](RELEASING.md)).
 
-Why not upstream binaries? The 2022-era releases are unusable on modern
-machines (the bottled companion misdetects Apple Silicon simulators as
-x86_64; the PyPI client crashes a current companion's install RPC), and
-Meta's open-source build of `main` needed the fixes carried in
-[patches/](patches/). [docs/BUILDING_IDB.md](docs/BUILDING_IDB.md)
+Why not upstream binaries? Upstream publishes a companion and client with
+each release again (since v1.6), and rules_idb builds from one (v1.7.8), but
+the runner depends on fixes in [patches/](patches/) that are proposed
+upstream and not yet released: random test ordering, configurable connection
+timeouts, sanitizer `DYLD_*` passthrough, Swift test bundle library paths,
+and two hangs/false failures. Once a release includes them, rules_idb can use
+the official artifacts. [docs/BUILDING_IDB.md](docs/BUILDING_IDB.md)
 documents building the toolchain yourself; point
 `RULES_IDB_IDB_PATH`/`RULES_IDB_COMPANION_PATH` at the result to override
 the bundled binaries.

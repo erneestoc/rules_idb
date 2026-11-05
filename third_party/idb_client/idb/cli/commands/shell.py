@@ -4,14 +4,12 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# pyre-strict
 
 import shlex
 import sys
 from argparse import ArgumentParser, Namespace
-from typing import Optional
 
-from idb.cli import ClientCommand
+from idb.cli import ClientCommand, format_retry
 from idb.common.command import CommandGroup
 from idb.common.types import Client, IdbException
 from idb.utils.typing import none_throws
@@ -44,6 +42,8 @@ class ShellCommand(ClientCommand):
         # Setup
         root_command = none_throws(self.root_command)
         prompt = "" if args.no_prompt else "idb> "
+        retry_verdict = getattr(args, "retry_verdict", False)
+        retry_as_json = getattr(args, "json", False)
         # Prompt loop
         while True:
             sys.stdout.flush()
@@ -63,4 +63,14 @@ class ShellCommand(ClientCommand):
                 print("SUCCESS=1")
             except IdbException as e:
                 print(e.args[0], file=sys.stderr)
+                if e.retry is not None and (
+                    retry_verdict or getattr(args, "retry_verdict", False)
+                ):
+                    print(
+                        format_retry(
+                            e.retry,
+                            as_json=retry_as_json or getattr(args, "json", False),
+                        ),
+                        file=sys.stderr,
+                    )
                 print("SUCCESS=0")
