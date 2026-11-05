@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       idb_commit:
-        description: "facebook/idb commit to build (default: the v1.7.8 tag)"
-        required: true
-        default: "c793afad2a31092628f7013cf1aa96f266c85024"
+        description: "facebook/idb commit to build (empty = IDB_COMMIT in idb/extensions.bzl)"
+        required: false
+        default: ""
       release_tag:
         description: "Existing release tag to attach the artifact to (empty = artifact only)"
         required: false
@@ -35,10 +35,16 @@ jobs:
         run: brew install xcodegen protobuf
 
       - name: Check out facebook/idb at pinned commit
+        env:
+          INPUT_COMMIT: ${{ inputs.idb_commit }}
         run: |
-          git clone https://github.com/facebook/idb.git idb-src
+          IDB_COMMIT="${INPUT_COMMIT:-$(sed -n 's/^IDB_COMMIT = "\(.*\)"$/\1/p' idb/extensions.bzl)}"
+          echo "Building facebook/idb $IDB_COMMIT"
+          # Just the pinned commit: idb's full history is several hundred MB.
+          git init -q idb-src
           cd idb-src
-          git checkout "${{ inputs.idb_commit }}"
+          git fetch -q --depth 1 https://github.com/facebook/idb.git "$IDB_COMMIT"
+          git checkout -q FETCH_HEAD
           git apply "$GITHUB_WORKSPACE/patches/idb-build-fixes.patch"
 
       - name: Build companion, shims, and simulator bridge

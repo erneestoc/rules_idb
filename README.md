@@ -14,7 +14,7 @@ simulators and cleans the lock up in shell traps.
 `rules_idb` replaces only the *run* phase: bundling, code signing, and
 providers all still come from rules_apple. It is a drop-in `runner` for
 `ios_unit_test` and `ios_ui_test`, and it is fully self-contained: the idb
-client ships vendored (on a hermetic python toolchain) and the prebuilt
+client is built from source (on a hermetic python toolchain) and the prebuilt
 `idb_companion` is fetched from this repository's releases. **The only host
 requirement is Xcode.**
 
@@ -99,8 +99,9 @@ Or use the predefined `@rules_idb//idb:default_runner`. For coverage, add
 
 Just Xcode. Nothing to `brew install`, no python setup, no PATH plumbing:
 
-* the **idb python client** is vendored in this repository
-  (`third_party/idb_client`, pinned facebook/idb release) and runs on a
+* the **idb python client** is built from the pinned facebook/idb release:
+  a module extension fetches its source (sha256-verified), applies
+  [patches/](patches/) and generates its gRPC modules, and it runs on a
   hermetic python 3.12 toolchain via rules_python;
 * the **`idb_companion` binary** (plus simulator shims) is prebuilt by this
   repository's [release pipeline](.github/workflows/build-idb-dist.yml)
@@ -211,7 +212,7 @@ Both are now bounded by default, so neither needs configuring:
   died, so shortening it cannot affect a passing run.
 * `RULES_IDB_BUNDLE_READY_SECS` (default 25s, upstream hardcodes 60s) bounds
   how long idb waits for the test bundle to connect. Upstream provides no way
-  to change this; the vendored patch adds one, following the precedent
+  to change this; the patch adds one, following the precedent
   `FBXCTEST_CRASH_WAIT_TIMEOUT` already sets in the same subsystem. A healthy
   launch reaches its first result in a couple of seconds; raise this if yours
   legitimately takes longer.

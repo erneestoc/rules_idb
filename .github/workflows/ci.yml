@@ -5,11 +5,6 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  # facebook/idb revision the companion is built from (the v1.7.8 tag); must
-  # match docs/BUILDING_IDB.md and the build-idb-dist workflow default.
-  IDB_COMMIT: c793afad2a31092628f7013cf1aa96f266c85024
-
 jobs:
   # Build the companion from the CURRENT commit's pin + patches (not from a
   # release), cached on (idb commit, patch contents).
@@ -29,19 +24,30 @@ jobs:
           xcodebuild -version
           echo "version=$(xcodebuild -version | tr '\n' '-' | tr -c 'A-Za-z0-9.-' '_')" >> "$GITHUB_OUTPUT"
 
+      # The facebook/idb revision is pinned once, in idb/extensions.bzl, which
+      # also builds the client from it: the companion and the client cannot
+      # come from different trees.
+      - name: Read the idb pin
+        id: pin
+        run: echo "commit=$(sed -n 's/^IDB_COMMIT = "\(.*\)"$/\1/p' idb/extensions.bzl)" >> "$GITHUB_OUTPUT"
+
       - id: cache
         uses: actions/cache@v4
         with:
           path: idb-companion-dist.tar.gz
-          key: companion-${{ env.IDB_COMMIT }}-${{ hashFiles('patches/idb-build-fixes.patch') }}-${{ steps.xcode.outputs.version }}-v2
+          key: companion-${{ steps.pin.outputs.commit }}-${{ hashFiles('patches/idb-build-fixes.patch') }}-${{ steps.xcode.outputs.version }}-v2
 
       - name: Build companion from pinned commit + patches
         if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          IDB_COMMIT: ${{ steps.pin.outputs.commit }}
         run: |
           brew install xcodegen protobuf
-          git clone https://github.com/facebook/idb.git idb-src
+          # Just the pinned commit: idb's full history is several hundred MB.
+          git init -q idb-src
           cd idb-src
-          git checkout "$IDB_COMMIT"
+          git fetch -q --depth 1 https://github.com/facebook/idb.git "$IDB_COMMIT"
+          git checkout -q FETCH_HEAD
           git apply "$GITHUB_WORKSPACE/patches/idb-build-fixes.patch"
           # Only what the test runner needs, not upstream's whole
           # `build all` distribution: the REPL, sim-video and the tvOS

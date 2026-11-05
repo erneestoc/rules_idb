@@ -98,6 +98,12 @@ cp $S/libShimulator-iOS.dylib $R/libShimulator-macOS.dylib \
 
 ## 3. Build the python client
 
+Bazel builds the client itself: `idb/extensions.bzl` fetches the source at
+`IDB_COMMIT`, applies the patch, and generates `idb_pb2.py` / `idb_grpc.py`
+with `//third_party/idb_client:gen_grpc` (what upstream's `setup.py` does).
+Nothing needs to be copied into the repository. To run a client outside
+Bazel, install it from the patched tree:
+
 ```sh
 uv venv --python 3.12 /path/to/rules_idb/.venv-src
 mkdir /tmp/idb-py && git archive HEAD | tar -x -C /tmp/idb-py
@@ -107,16 +113,6 @@ FB_IDB_VERSION=1.7.8 uv pip install --python /path/to/rules_idb/.venv-src/bin/py
 
 Install from a copy outside the source tree: the python build writes to
 `build/`, which collides with Xcode's `Build/` on case-insensitive APFS.
-
-To re-vendor `third_party/idb_client`, copy the installed package (it
-includes the generated `idb_pb2.py` / `idb_grpc.py`), leaving out tests:
-
-```sh
-SP=/path/to/rules_idb/.venv-src/lib/python3.12/site-packages
-rm -rf third_party/idb_client/idb
-rsync -a --exclude __pycache__ --exclude tests --exclude '*_tests.py' \
-  "$SP/idb/" third_party/idb_client/idb/
-```
 
 ## 4. Point rules_idb at the toolchain
 

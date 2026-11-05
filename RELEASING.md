@@ -3,8 +3,8 @@
 Every release pins three things, and the release notes must record all of
 them:
 
-1. **The facebook/idb commit** the companion artifact and the vendored
-   python client were built from.
+1. **The facebook/idb commit** the companion artifact and the python
+   client were built from (`IDB_COMMIT` in `idb/extensions.bzl`).
 2. **The patch** (`patches/idb-build-fixes.patch`) applied on top of it.
 3. **The Xcode/macOS version** the artifact was built with and the versions
    it was verified against.
@@ -28,10 +28,10 @@ adds the module directory itself; expect BCR maintainer review.
 1. If bumping the idb pin (or Xcode broke something):
    - Update the local checkout, re-apply/extend the patch, and rebuild per
      [docs/BUILDING_IDB.md](docs/BUILDING_IDB.md).
-   - Re-vendor the python client if `idb/` or `proto/idb.proto` changed:
-     install it from the patched tree and copy the installed package (with
-     its generated `idb_pb2.py`/`idb_grpc.py`) into `third_party/idb_client/`,
-     per docs/BUILDING_IDB.md.
+   - Update `IDB_COMMIT` and `IDB_SOURCE_SHA256` in `idb/extensions.bzl`.
+     CI and the companion workflow read the commit from there, and the
+     client is built from the same source and patch, so that is the only
+     pin to change.
    - Drop from the patch any fix the new upstream release includes; when
      none are left, switch to upstream's published companion and client.
    - Run the full example suite and the benchmark.

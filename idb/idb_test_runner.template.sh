@@ -37,7 +37,7 @@
 #   RULES_IDB_BUNDLE_READY_SECS  how long idb waits for the test bundle to
 #                             connect before treating startup as failed
 #                             (default 25s here; upstream hardcodes 60s and
-#                             the vendored patch makes it configurable. Raise
+#                             the patch makes it configurable. Raise
 #                             it if a healthy launch legitimately takes longer
 #                             to hand control to XCTest)
 #   RULES_IDB_STARTUP_GRACE_SECS  how long to wait after the host app is
@@ -956,7 +956,7 @@ spawn_companion() {
   # JetsamEvent rather than a pid-matching crash log) never will.
   companion_env+=("FBXCTEST_CRASH_WAIT_TIMEOUT=${RULES_IDB_CRASH_WAIT_SECS:-5}")
   # How long idb waits for the test bundle to connect before declaring the
-  # startup failed. Upstream hardcodes 60s; the vendored patch makes it
+  # startup failed. Upstream hardcodes 60s; the patch makes it
   # configurable, which is the difference between noticing a host that died
   # during launch in seconds rather than a minute.
   # A healthy launch reaches its first test result in a couple of seconds;

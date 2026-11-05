@@ -1,3 +1,6 @@
 aiofiles
 grpclib>=0.4.0
 protobuf>=7.35.1
+# Build time only: generates the idb client's gRPC modules from
+# proto/idb.proto (see idb/extensions.bzl).
+grpcio-tools
