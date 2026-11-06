@@ -1,577 +1,42 @@
-diff --git a/Companion/Reporting/FBiOSTargetDescription.swift b/Companion/Reporting/FBiOSTargetDescription.swift
-index 82599f4..3332edb 100644
---- a/Companion/Reporting/FBiOSTargetDescription.swift
-+++ b/Companion/Reporting/FBiOSTargetDescription.swift
-@@ -49,8 +49,8 @@ final class FBiOSTargetDescription: NSObject, FBiOSTargetInfo {
-       Self.keyModel: model as Any? ?? NSNull(),
-       Self.keyName: name as Any? ?? NSNull(),
-       Self.keyOSVersion: osVersion.name as Any? ?? NSNull(),
--      Self.keyState: FBiOSTargetStateStringFromState(state),
--      Self.keyType: FBiOSTargetTypeStringFromTargetType(targetType),
-+      Self.keyState: FBiOSTargetStateStringRepresentation(state),
-+      Self.keyType: FBiOSTargetTypeStringRepresentation(targetType),
-       Self.keyUDID: udid as Any? ?? NSNull(),
-     ]
-     for (key, value) in extendedInformation {
-diff --git a/Companion/SwiftServer/MethodHandlers/AddMediaMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/AddMediaMethodHandler.swift
-index ae036d2..07940ba 100644
---- a/Companion/SwiftServer/MethodHandlers/AddMediaMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/AddMediaMethodHandler.swift
-@@ -15,9 +15,13 @@ struct AddMediaMethodHandler {
-   let commandExecutor: FBIDBCommandExecutor
- 
-   func handle(requestStream: GRPCAsyncRequestStream<Idb_AddMediaRequest>, context: GRPCAsyncServerCallContext) async throws -> Idb_AddMediaResponse {
-+    // grpc-swift traps if a second AsyncIterator is created; read every
-+    // request frame through one owned iterator.
-+    let stream = SingleIteratorRequestStream(requestStream)
-+
-     let extractedFileURLs =
-       try await MultisourceFileReader
--      .filePathURLs(from: requestStream, temporaryDirectory: commandExecutor.temporaryDirectory, extractFromSubdir: true)
-+      .filePathURLs(from: stream, temporaryDirectory: commandExecutor.temporaryDirectory, extractFromSubdir: true)
- 
-     try await commandExecutor.add_media(extractedFileURLs)
-     return .init()
-diff --git a/Companion/SwiftServer/MethodHandlers/DapMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/DapMethodHandler.swift
-index ff0a1a7..a007807 100644
---- a/Companion/SwiftServer/MethodHandlers/DapMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/DapMethodHandler.swift
-@@ -18,7 +18,11 @@ struct DapMethodHandler: @unchecked Sendable {
-   let targetLogger: FBControlCoreLogger
- 
-   func handle(requestStream: GRPCAsyncRequestStream<Idb_DapRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_DapResponse>, context: GRPCAsyncServerCallContext) async throws {
--    guard case let .start(start) = try await requestStream.requiredNext.control
-+    // grpc-swift traps if a second AsyncIterator is created; read every
-+    // request frame through one owned iterator.
-+    let stream = SingleIteratorRequestStream(requestStream)
-+
-+    guard case let .start(start) = try await stream.requiredNext.control
-     else { throw GRPCStatus(code: .failedPrecondition, message: "Dap command expected a Start messaged in the beginning of the Stream") }
- 
-     let writer = FBProcessInput<FBDataConsumer>.fromConsumer().retyped(FBProcessInput<AnyObject>.self)
-@@ -26,7 +30,7 @@ struct DapMethodHandler: @unchecked Sendable {
- 
-     let tenHours: UInt64 = 36000 * 1000000000
-     try await Task.timeout(nanoseconds: tenHours) {
--      try await consumeElements(from: requestStream, to: writer, dapProcess: dapProcess)
-+      try await consumeElements(from: stream, to: writer, dapProcess: dapProcess)
+diff --git a/CompanionLib/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift b/CompanionLib/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift
+index 9512fa3..5c8c93b 100644
+--- a/CompanionLib/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift
++++ b/CompanionLib/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift
+@@ -82,7 +82,8 @@ struct XCTestRunMethodHandler {
+         coverageRequest: extractCodeCoverage(from: request),
+         collectLogs: request.collectLogs,
+         waitForDebugger: request.waitForDebugger,
+-        collectResultBundle: request.collectResultBundle)
++        collectResultBundle: request.collectResultBundle,
++        randomizeExecutionOrder: request.randomizeExecutionOrder)
+     case let .application(app):
+       return XCTestRunRequest.applicationTest(
+         withTestBundleID: request.testBundleID,
+@@ -97,7 +98,8 @@ struct XCTestRunMethodHandler {
+         coverageRequest: extractCodeCoverage(from: request),
+         collectLogs: request.collectLogs,
+         waitForDebugger: request.waitForDebugger,
+-        collectResultBundle: request.collectResultBundle)
++        collectResultBundle: request.collectResultBundle,
++        randomizeExecutionOrder: request.randomizeExecutionOrder)
+     case let .ui(ui):
+       return XCTestRunRequest.uiTest(
+         withTestBundleID: request.testBundleID,
+@@ -112,7 +114,8 @@ struct XCTestRunMethodHandler {
+         reportAttachments: request.reportAttachments,
+         coverageRequest: extractCodeCoverage(from: request),
+         collectLogs: request.collectLogs,
+-        collectResultBundle: request.collectResultBundle)
++        collectResultBundle: request.collectResultBundle,
++        randomizeExecutionOrder: request.randomizeExecutionOrder)
+     case .none:
+       return nil
      }
- 
-     let stoppedResponse = Idb_DapResponse.with {
-@@ -59,8 +63,8 @@ struct DapMethodHandler: @unchecked Sendable {
-     return process
-   }
- 
--  private func consumeElements(from requestStream: GRPCAsyncRequestStream<Idb_DapRequest>, to writer: FBProcessInput<AnyObject>, dapProcess: FBSubprocess<AnyObject, FBDataConsumer, NSString>) async throws {
--    for try await request in requestStream {
-+  private func consumeElements(from stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_DapRequest>>, to writer: FBProcessInput<AnyObject>, dapProcess: FBSubprocess<AnyObject, FBDataConsumer, NSString>) async throws {
-+    while let request = try await stream.next() {
-       switch request.control {
-       case .start:
-         throw GRPCStatus(code: .failedPrecondition, message: "DAP server already started")
-diff --git a/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
-index ed4a6a8..c67f1e4 100644
---- a/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/DescribeMethodHandler.swift
-@@ -24,8 +24,8 @@ struct DescribeMethodHandler {
-       $0.targetDescription = .with {
-         $0.udid = target.udid
-         $0.name = target.name
--        $0.state = FBiOSTargetStateStringFromState(target.state).rawValue
--        $0.targetType = FBiOSTargetTypeStringFromTargetType(target.targetType).lowercased()
-+        $0.state = FBiOSTargetStateStringRepresentation(target.state).rawValue
-+        $0.targetType = String(FBiOSTargetTypeStringRepresentation(target.targetType)).lowercased()
-         $0.osVersion = target.osVersion.name.rawValue
-         if let screenInfo = target.screenInfo {
-           $0.screenDimensions = .with {
-diff --git a/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
-index 06d44bb..8b8c409 100644
---- a/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/InstallMethodHandler.swift
-@@ -18,7 +18,8 @@ struct InstallMethodHandler: @unchecked Sendable {
- 
-   func handle(requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_InstallResponse>, context: GRPCAsyncServerCallContext) async throws {
- 
--    let artifact = try await install(requestStream: requestStream, responseStream: responseStream)
-+    let stream = SingleIteratorRequestStream(requestStream)
-+    let artifact = try await install(stream: stream, responseStream: responseStream)
- 
-     let response = Idb_InstallResponse.with {
-       $0.name = artifact.name
-@@ -27,7 +28,7 @@ struct InstallMethodHandler: @unchecked Sendable {
-     try await responseStream.send(response)
-   }
- 
--  private func install(requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_InstallResponse>) async throws -> FBInstalledArtifact {
-+  private func install(stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_InstallRequest>>, responseStream: GRPCAsyncResponseStreamWriter<Idb_InstallResponse>) async throws -> FBInstalledArtifact {
- 
-     func extractPayloadFromRequest() throws -> Idb_Payload {
-       guard let payload = request.extractPayload() else {
-@@ -36,34 +37,34 @@ struct InstallMethodHandler: @unchecked Sendable {
-       return payload
-     }
- 
--    var request = try await requestStream.requiredNext
-+    var request = try await stream.requiredNext
- 
-     guard case let .destination(destination) = request.value else {
-       throw GRPCStatus(code: .failedPrecondition, message: "Expected destination as first request in stream")
-     }
--    request = try await requestStream.requiredNext
-+    request = try await stream.requiredNext
- 
-     var name = UUID().uuidString
-     if case let .nameHint(nameHint) = request.value {
-       name = nameHint
--      request = try await requestStream.requiredNext
-+      request = try await stream.requiredNext
-     }
- 
-     var makeDebuggable = false
-     if case let .makeDebuggable(debuggable) = request.value {
-       makeDebuggable = debuggable
--      request = try await requestStream.requiredNext
-+      request = try await stream.requiredNext
-     }
-     var overrideModificationTime = false
-     if case let .overrideModificationTime(omtime) = request.value {
-       overrideModificationTime = omtime
--      request = try await requestStream.requiredNext
-+      request = try await stream.requiredNext
-     }
- 
-     var skipSigningBundles = false
-     if case let .skipSigningBundles(skip) = request.value {
-       skipSigningBundles = skip
--      request = try await requestStream.requiredNext
-+      request = try await stream.requiredNext
-     }
- 
-     var linkToBundle: FBDsymInstallLinkToBundle?
-@@ -71,12 +72,12 @@ struct InstallMethodHandler: @unchecked Sendable {
-     // (2022-03-02) REMOVE! Keeping only for retrocompatibility
-     if case let .bundleID(id) = request.value {
-       linkToBundle = .init(bundleID: id, bundleType: .app)
--      request = try await requestStream.requiredNext
-+      request = try await stream.requiredNext
-     }
- 
-     if case let .linkDsymToBundle(link) = request.value {
-       linkToBundle = readLinkBundleToDsym(from: link)
--      request = try await requestStream.requiredNext
-+      request = try await stream.requiredNext
-     }
- 
-     var payload = try extractPayloadFromRequest()
-@@ -84,14 +85,14 @@ struct InstallMethodHandler: @unchecked Sendable {
-     var compression = FBCompressionFormat.GZIP
-     if case let .compression(format) = payload.source {
-       compression = readCompressionFormat(from: format)
--      request = try await requestStream.requiredNext
-+      request = try await stream.requiredNext
-       payload = try extractPayloadFromRequest()
-     }
- 
-     return try await installData(
-       from: payload.source,
-       to: destination,
--      requestStream: requestStream,
-+      stream: stream,
-       name: name,
-       makeDebuggable: makeDebuggable,
-       linkToBundle: linkToBundle,
-@@ -103,7 +104,7 @@ struct InstallMethodHandler: @unchecked Sendable {
-   private func installData(
-     from source: Idb_Payload.OneOf_Source?,
-     to destination: Idb_InstallRequest.Destination,
--    requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>,
-+    stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_InstallRequest>>,
-     name: String,
-     makeDebuggable: Bool,
-     linkToBundle: FBDsymInstallLinkToBundle?,
-@@ -134,14 +135,14 @@ struct InstallMethodHandler: @unchecked Sendable {
-       if destination == .app && isZipArchive(data) {
-         return try await installZipArchive(
-           initial: data,
--          requestStream: requestStream,
-+          stream: stream,
-           makeDebuggable: makeDebuggable,
-           overrideModificationTime: overrideModificationTime)
-       }
- 
-       let input = FBProcessInput<OutputStream>.fromStream()
-       let output = input.contents
--      async let writePayload: Void = writePayload(initial: data, requestStream: requestStream, output: output)
-+      async let writePayload: Void = writePayload(initial: data, stream: stream, output: output)
-       let artifact = try await installSource(
-         dataStream: unsafeBitCast(input, to: FBProcessInput<AnyObject>.self),
-         skipSigningBundles: skipSigningBundles)
-@@ -184,7 +185,7 @@ struct InstallMethodHandler: @unchecked Sendable {
- 
-   private func installZipArchive(
-     initial: Data,
--    requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>,
-+    stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_InstallRequest>>,
-     makeDebuggable: Bool,
-     overrideModificationTime: Bool
-   ) async throws -> FBInstalledArtifact {
-@@ -199,7 +200,7 @@ struct InstallMethodHandler: @unchecked Sendable {
-     let file = try FileHandle(forWritingTo: archiveURL)
-     do {
-       try file.write(contentsOf: initial)
--      for try await request in requestStream {
-+      while let request = try await stream.next() {
-         guard let data = request.extractDataFrame() else {
-           continue
-         }
-@@ -219,14 +220,14 @@ struct InstallMethodHandler: @unchecked Sendable {
- 
-   private func writePayload(
-     initial: Data,
--    requestStream: GRPCAsyncRequestStream<Idb_InstallRequest>,
-+    stream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_InstallRequest>>,
-     output: OutputStream
-   ) async throws {
-     output.open()
-     defer { output.close() }
- 
-     try write(initial, to: output)
--    for try await request in requestStream {
-+    while let request = try await stream.next() {
-       guard let data = request.extractDataFrame() else {
-         continue
-       }
-diff --git a/Companion/SwiftServer/MethodHandlers/InstrumentsRunMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/InstrumentsRunMethodHandler.swift
-index b2d1827..1589eca 100644
---- a/Companion/SwiftServer/MethodHandlers/InstrumentsRunMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/InstrumentsRunMethodHandler.swift
-@@ -22,12 +22,17 @@ struct InstrumentsRunMethodHandler {
-   func handle(requestStream: GRPCAsyncRequestStream<Idb_InstrumentsRunRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_InstrumentsRunResponse>, context: GRPCAsyncServerCallContext) async throws {
-     @Atomic var finishedWriting = false
- 
--    guard case let .start(start) = try await requestStream.requiredNext.control
-+    // Read every request frame through one owned iterator: grpc-swift's
-+    // request stream traps if a second AsyncIterator is created, and this
-+    // handler reads more than one frame.
-+    let stream = SingleIteratorRequestStream(requestStream)
-+
-+    guard case let .start(start) = try await stream.requiredNext.control
-     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected start control") }
- 
-     let operation = try await startInstrumentsOperation(request: start, responseStream: responseStream, finishedWriting: _finishedWriting)
- 
--    guard case let .stop(stop) = try await requestStream.requiredNext.control
-+    guard case let .stop(stop) = try await stream.requiredNext.control
-     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected end control") }
- 
-     try await stopInstruments(operation: operation, request: stop, responseStream: responseStream, finishedWriting: _finishedWriting)
-diff --git a/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift
-index 7cfd41c..d755b2b 100644
---- a/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/LaunchMethodHandler.swift
-@@ -19,7 +19,12 @@ struct LaunchMethodHandler: @unchecked Sendable {
-   func handle(requestStream: GRPCAsyncRequestStream<Idb_LaunchRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_LaunchResponse>, context: GRPCAsyncServerCallContext) async throws {
-     var consumers: [any FBDataConsumerLifecycle] = []
- 
--    var request = try await requestStream.requiredNext
-+    // Read every request frame through one owned iterator: grpc-swift's
-+    // request stream traps if a second AsyncIterator is created, and this
-+    // handler reads more than one frame.
-+    let stream = SingleIteratorRequestStream(requestStream)
-+
-+    var request = try await stream.requiredNext
-     guard case let .start(start) = request.control else {
-       throw GRPCStatus(code: .failedPrecondition, message: "Application not started yet")
-     }
-@@ -70,21 +75,27 @@ struct LaunchMethodHandler: @unchecked Sendable {
- 
-     guard start.waitFor else { return }
- 
--    request = try await requestStream.requiredNext
-+    request = try await stream.requiredNext
-     guard case .stop = request.control else {
-       throw GRPCStatus(code: .failedPrecondition, message: "Application has already started")
-     }
- 
-     try await launchedApp.terminate()
- 
--    try await withThrowingTaskGroup(of: Void.self) { group in
--      for consumer in consumers {
--        nonisolated(unsafe) let consumer = consumer
--        group.addTask {
--          try await consumer.awaitFinishedConsumingAsync()
--        }
-+    // Built as a plain Task array (rather than a TaskGroup) with an explicit
-+    // Task<Void, Error> generic argument: withThrowingTaskGroup's addTask
-+    // triggers a spurious "sending" data-race diagnostic on this closure
-+    // under the current toolchain even with a nonisolated(unsafe) rebind,
-+    // while the explicitly-typed Task initializer does not.
-+    let consumerTasks: [Task<Void, Error>] = consumers.map { consumer in
-+      nonisolated(unsafe) let consumer = consumer
-+      nonisolated(unsafe) let awaitConsumed: @Sendable () async throws -> Void = {
-+        try await consumer.awaitFinishedConsumingAsync()
-       }
--      try await group.waitForAll()
-+      return Task<Void, Error>.detached(operation: awaitConsumed)
-+    }
-+    for task in consumerTasks {
-+      _ = try await task.value
-     }
-   }
- 
-diff --git a/Companion/SwiftServer/MethodHandlers/LogMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/LogMethodHandler.swift
-index fb88d3b..eb6a416 100644
---- a/Companion/SwiftServer/MethodHandlers/LogMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/LogMethodHandler.swift
-@@ -51,9 +51,10 @@ struct LogMethodHandler: @unchecked Sendable {
-     // `operation` is a thread-safe handle but not Sendable; rebind as
-     // nonisolated(unsafe) so the observer Task can capture it.
-     nonisolated(unsafe) let operationToObserve = operation
--    let observeOperationCompletion = Task<Void, Error> {
-+    nonisolated(unsafe) let observeCompletion: () async throws -> Void = {
-       try await operationToObserve.waitUntilCompleted()
-     }
-+    let observeOperationCompletion = Task<Void, Error>(operation: observeCompletion)
-     try await Task.select(observeWritingDone, observeOperationCompletion).value
-     writingDone.resolve(())
- 
-diff --git a/Companion/SwiftServer/MethodHandlers/PushMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/PushMethodHandler.swift
-index 34d50dc..925ec2b 100644
---- a/Companion/SwiftServer/MethodHandlers/PushMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/PushMethodHandler.swift
-@@ -16,14 +16,18 @@ struct PushMethodHandler {
-   let commandExecutor: FBIDBCommandExecutor
- 
-   func handle(requestStream: GRPCAsyncRequestStream<Idb_PushRequest>, context: GRPCAsyncServerCallContext) async throws -> Idb_PushResponse {
--    let request = try await requestStream.requiredNext
-+    // grpc-swift traps if a second AsyncIterator is created; read every
-+    // request frame through one owned iterator.
-+    let stream = SingleIteratorRequestStream(requestStream)
-+
-+    let request = try await stream.requiredNext
- 
-     guard case let .inner(inner) = request.value
-     else { throw GRPCStatus(code: .invalidArgument, message: "Expected inner as first request in stream") }
- 
-     let extractedFileURLs =
-       try await MultisourceFileReader
--      .filePathURLs(from: requestStream, temporaryDirectory: commandExecutor.temporaryDirectory, extractFromSubdir: false)
-+      .filePathURLs(from: stream, temporaryDirectory: commandExecutor.temporaryDirectory, extractFromSubdir: false)
- 
-     let fileContainer = FileContainerValueTransformer.rawFileContainer(from: inner.container)
-     try await commandExecutor.push_files(extractedFileURLs, to_path: inner.dstPath, containerType: fileContainer)
-diff --git a/Companion/SwiftServer/MethodHandlers/RecordMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/RecordMethodHandler.swift
-index 9333e9c..5410dc8 100644
---- a/Companion/SwiftServer/MethodHandlers/RecordMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/RecordMethodHandler.swift
-@@ -17,7 +17,14 @@ struct RecordMethodHandler {
- 
-   func handle(requestStream: GRPCAsyncRequestStream<Idb_RecordRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_RecordResponse>, context: GRPCAsyncServerCallContext) async throws {
- 
--    let request = try await requestStream.requiredNext
-+    // grpc-swift's request stream traps if a second AsyncIterator is ever
-+    // created; this handler reads two frames (start, then stop), so both
-+    // reads must go through one owned iterator. `requestStream.requiredNext`
-+    // makes a fresh iterator per call and crashes the companion on the stop
-+    // frame, so route every read through a single SingleIteratorRequestStream.
-+    let stream = SingleIteratorRequestStream(requestStream)
-+
-+    let request = try await stream.requiredNext
-     guard case let .start(start) = request.control
-     else { throw GRPCStatus(code: .failedPrecondition, message: "Expect start as initial request frame") }
- 
-@@ -31,7 +38,7 @@ struct RecordMethodHandler {
-     }
-     let recording = try await asyncTarget.startRecording(toFile: filePath)
- 
--    _ = try await requestStream.requiredNext
-+    _ = try await stream.requiredNext
-     let outputURL = try await recording.stop()
- 
-     if start.filePath.isEmpty {
-diff --git a/Companion/SwiftServer/MethodHandlers/ReplMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/ReplMethodHandler.swift
-index ee2c1fe..b3f92d3 100644
---- a/Companion/SwiftServer/MethodHandlers/ReplMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/ReplMethodHandler.swift
-@@ -22,7 +22,11 @@ struct ReplMethodHandler {
-   let recordingCoordinator: ReplRecordingCoordinator
- 
-   func handle(requestStream: GRPCAsyncRequestStream<Idb_ReplRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_ReplResponse>, context: GRPCAsyncServerCallContext) async throws {
--    guard case let .start(start) = try await requestStream.requiredNext.control
-+    // grpc-swift traps if a second AsyncIterator is created; read every
-+    // request frame through one owned iterator.
-+    let stream = SingleIteratorRequestStream(requestStream)
-+
-+    guard case let .start(start) = try await stream.requiredNext.control
-     else { throw GRPCStatus(code: .failedPrecondition, message: "repl expected a Start message at the beginning of the stream") }
- 
-     targetLogger.debug().log("REPL session context: \(start.context)")
-@@ -56,14 +60,14 @@ struct ReplMethodHandler {
-     // than pulled back over gRPC.
-     let sharedFilesystem = !start.probeFilePath.isEmpty && FileManager.default.fileExists(atPath: start.probeFilePath)
- 
--    try await serve(session: session, sharedFilesystem: sharedFilesystem, context: start.context, appBundleID: appBundleID, requestStream: requestStream, responseStream: responseStream)
-+    try await serve(session: session, sharedFilesystem: sharedFilesystem, context: start.context, appBundleID: appBundleID, requestStream: stream, responseStream: responseStream)
-   }
- 
-   /// Bridges the gRPC repl stream to a launched session's control socket:
-   /// connects to the socket, reports `ready`, forwards each `Execute` (a dylib
-   /// plus a symbol) to the socket and streams back the result, and on stop/EOF
-   /// closes the socket (which ends the served process) and reports `stopped`.
--  private func serve(session: ReplSession, sharedFilesystem: Bool, context: Idb_ReplRequest.Start.Context, appBundleID: String?, requestStream: GRPCAsyncRequestStream<Idb_ReplRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_ReplResponse>) async throws {
-+  private func serve(session: ReplSession, sharedFilesystem: Bool, context: Idb_ReplRequest.Start.Context, appBundleID: String?, requestStream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Idb_ReplRequest>>, responseStream: GRPCAsyncResponseStreamWriter<Idb_ReplResponse>) async throws {
-     // Per-session scratch directory for the dylibs received over the wire. It
-     // lives on the host filesystem, which the simulator process can read.
-     let scratchDirectory = (NSTemporaryDirectory() as NSString).appendingPathComponent("idb_repl_\(UUID().uuidString)")
-@@ -126,7 +130,7 @@ struct ReplMethodHandler {
-     let dispatcher = HostCommandDispatcher(commandExecutor: commandExecutor, state: hostState, recordingCoordinator: recordingCoordinator, appBundleID: appBundleID)
- 
-     var runIndex = 0
--    bridge: for try await request in requestStream {
-+    bridge: while let request = try await requestStream.next() {
-       switch request.control {
-       case .start:
-         throw GRPCStatus(code: .failedPrecondition, message: "repl session already started")
-diff --git a/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift b/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift
-index 066369c..b6fcddb 100644
---- a/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift
-+++ b/Companion/SwiftServer/MethodHandlers/ReplSocketClient.swift
-@@ -169,10 +169,11 @@ final class ReplSocketClient: @unchecked Sendable {
-     let box = Box()
-     let semaphore = DispatchSemaphore(value: 0)
-     nonisolated(unsafe) let commandHandler = handler
--    Task {
-+    nonisolated(unsafe) let runCommand: @Sendable () async -> Void = {
-       box.value = await commandHandler(commandData)
-       semaphore.signal()
-     }
-+    Task<Void, Never>.detached(operation: runCommand)
-     semaphore.wait()
-     return box.value
-   }
-diff --git a/Companion/SwiftServer/MethodHandlers/TailMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/TailMethodHandler.swift
-index d26d4bf..a031f24 100644
---- a/Companion/SwiftServer/MethodHandlers/TailMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/TailMethodHandler.swift
-@@ -19,7 +19,12 @@ struct TailMethodHandler {
-   func handle(requestStream: GRPCAsyncRequestStream<Idb_TailRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_TailResponse>, context: GRPCAsyncServerCallContext) async throws {
-     @Atomic var finished = false
- 
--    guard case let .start(start) = try await requestStream.requiredNext.control
-+    // Read every request frame through one owned iterator: grpc-swift's
-+    // request stream traps if a second AsyncIterator is created, and this
-+    // handler reads more than one frame.
-+    let stream = SingleIteratorRequestStream(requestStream)
-+
-+    guard case let .start(start) = try await stream.requiredNext.control
-     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected start control") }
- 
-     let responseWriter = FIFOStreamWriter(stream: responseStream)
-@@ -38,7 +43,7 @@ struct TailMethodHandler {
-     let fileContainer = FileContainerValueTransformer.rawFileContainer(from: start.container)
-     let tail = try await commandExecutor.tail(start.path, to_consumer: consumer, in_container: fileContainer)
- 
--    guard case .stop = try await requestStream.requiredNext.control
-+    guard case .stop = try await stream.requiredNext.control
-     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected end control") }
- 
-     try await tail.cancel()
-diff --git a/Companion/SwiftServer/MethodHandlers/VideoStreamMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/VideoStreamMethodHandler.swift
-index fccbeeb..426c58e 100644
---- a/Companion/SwiftServer/MethodHandlers/VideoStreamMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/VideoStreamMethodHandler.swift
-@@ -34,7 +34,11 @@ struct VideoStreamMethodHandler {
-   func handle(requestStream: GRPCAsyncRequestStream<Idb_VideoStreamRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_VideoStreamResponse>, context: GRPCAsyncServerCallContext) async throws {
-     @Atomic var finished = false
- 
--    guard case let .start(start) = try await requestStream.requiredNext.control
-+    // grpc-swift traps if a second AsyncIterator is created; read every
-+    // request frame through one owned iterator.
-+    let stream = SingleIteratorRequestStream(requestStream)
-+
-+    guard case let .start(start) = try await stream.requiredNext.control
-     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected start control") }
- 
-     let videoStream = try await startVideoStream(
-@@ -43,7 +47,7 @@ struct VideoStreamMethodHandler {
-       finished: _finished)
- 
-     let observeClientCancelStreaming = Task<Void, Error> {
--      for try await request in requestStream {
-+      while let request = try await stream.next() {
-         switch request.control {
-         case .start:
-           throw GRPCStatus(code: .failedPrecondition, message: "Video streaming already started")
-diff --git a/Companion/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift
-index 41280c5..8f474b7 100644
---- a/Companion/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/XCTestRunMethodHandler.swift
-@@ -44,7 +44,19 @@ struct XCTestRunMethodHandler {
-       }
-     }
- 
--    _ = try await reporter.awaitReportingTerminated()
-+    // Reporting must terminate for this RPC to complete. If it does not -- the
-+    // terminal response failed to write, or the test host died in a way that
-+    // left the reporter without a final event -- returning is far better than
-+    // holding the stream open until the client times out, because the client
-+    // has no way to tell "still running" from "never going to finish".
-+    do {
-+      _ = try await reporter.awaitReportingTerminated()
-+    } catch {
-+      logger.error().log("Test reporting terminated with an error: \(error.localizedDescription)")
-+      throw GRPCStatus(
-+        code: .internalError,
-+        message: "xctest run ended without a terminal test result: \(error.localizedDescription)")
-+    }
-   }
- 
-   func transform(value request: Idb_XctestRunRequest) -> FBXCTestRunRequest? {
-diff --git a/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift b/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift
-index d99881f..bd4e046 100644
---- a/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift
-+++ b/Companion/SwiftServer/MethodHandlers/XctraceRecordMethodHandler.swift
-@@ -23,11 +23,16 @@ struct XctraceRecordMethodHandler {
-     @Atomic var finishedWriting = false
-     defer { _finishedWriting.set(true) }
- 
--    guard case let .start(start) = try await requestStream.requiredNext.control
-+    // Read every request frame through one owned iterator: grpc-swift's
-+    // request stream traps if a second AsyncIterator is created, and this
-+    // handler reads more than one frame.
-+    let stream = SingleIteratorRequestStream(requestStream)
-+
-+    guard case let .start(start) = try await stream.requiredNext.control
-     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected start control") }
-     let operation = try await startXCTraceOperation(request: start, responseStream: responseStream, finishedWriting: _finishedWriting)
- 
--    guard case let .stop(stop) = try await requestStream.requiredNext.control
-+    guard case let .stop(stop) = try await stream.requiredNext.control
-     else { throw GRPCStatus(code: .failedPrecondition, message: "Expected end control") }
- 
-     try await stopXCTrace(operation: operation, request: stop, responseStream: responseStream, finishedWriting: _finishedWriting)
-diff --git a/Companion/Utility/AsyncSequence+Extension.swift b/Companion/Utility/AsyncSequence+Extension.swift
-index 5051d98..40422a0 100644
---- a/Companion/Utility/AsyncSequence+Extension.swift
-+++ b/Companion/Utility/AsyncSequence+Extension.swift
-@@ -23,6 +23,12 @@ extension AsyncSequence {
- 
-   /// We have quite a lot of grpc request streams where we read request N constant number of times and do not need foreach loop. But pure next produces optinal by design.
-   /// This small tweak just saves us from lots of boilerplate of unwrapping the optionals everywhere
-+  ///
-+  /// - Warning: this reads via `first(where:)`, which creates a *new*
-+  ///   `AsyncIterator` on every call. `GRPCAsyncRequestStream` fatal-errors if a
-+  ///   second iterator is ever created, so this must be called at most once per
-+  ///   request stream. Handlers that read more than one frame must wrap the
-+  ///   stream in a `SingleIteratorRequestStream` and read through that instead.
-   var requiredNext: Element {
-     get async throws {
-       guard let next = try await first(where: { _ in true }) else {
-diff --git a/Companion/Utility/IDBXCTestReporter/IDBXCTestReporter.swift b/Companion/Utility/IDBXCTestReporter/IDBXCTestReporter.swift
-index 1b53b23..8aeba87 100644
---- a/Companion/Utility/IDBXCTestReporter/IDBXCTestReporter.swift
-+++ b/Companion/Utility/IDBXCTestReporter/IDBXCTestReporter.swift
-@@ -411,7 +411,21 @@ final class IDBXCTestReporter: NSObject, FBXCTestReporter, FBDataConsumer, @unch
+diff --git a/CompanionLib/XCTest/IDBXCTestReporter.swift b/CompanionLib/XCTest/IDBXCTestReporter.swift
+index 60582cd..afa749d 100644
+--- a/CompanionLib/XCTest/IDBXCTestReporter.swift
++++ b/CompanionLib/XCTest/IDBXCTestReporter.swift
+@@ -397,7 +397,18 @@ final class IDBXCTestReporter: XCTestReporter, DataConsumer, @unchecked Sendable
        return
      }
  
@@ -579,14 +44,11 @@ index 1b53b23..8aeba87 100644
 +    do {
 +      try await responseStream.send(response)
 +    } catch {
-+      // The stream has already been taken out of `_responseStream` above, so no
-+      // later write can settle `reportingTerminated`. Failing it here is what
-+      // keeps `awaitReportingTerminated()` -- and therefore the RPC -- from
-+      // hanging until the client's own timeout when the terminal write fails
-+      // (for example NIOAsyncWriterError.alreadyFinished when the response
-+      // writer was closed underneath us).
++      // The stream was taken out of `responseStream` above, so no later write can settle
++      // `reportingTerminated`. Fail it here, or `awaitReportingTerminated()`, and with it the RPC,
++      // waits until the client gives up.
 +      if shouldCloseStream {
-+        logger.error().log("Failed to write the terminal xctest response (\(error.localizedDescription)); terminating reporting with that error")
++        logger.error().log("Failed to write the last xctest response: \(error)")
 +        reportingTerminated.fail(error)
 +      }
 +      throw error
@@ -594,59 +56,93 @@ index 1b53b23..8aeba87 100644
  
      if shouldCloseStream {
        logger.log("Test Reporting has finished with status \(response.status)")
-diff --git a/Companion/Utility/MultisourceFileReader.swift b/Companion/Utility/MultisourceFileReader.swift
-index bef25d5..2dab4bc 100644
---- a/Companion/Utility/MultisourceFileReader.swift
-+++ b/Companion/Utility/MultisourceFileReader.swift
-@@ -13,9 +13,9 @@ import IDBGRPCSwift
+diff --git a/CompanionLib/XCTest/XCTestDescriptor.swift b/CompanionLib/XCTest/XCTestDescriptor.swift
+index 0141a14..da2574c 100644
+--- a/CompanionLib/XCTest/XCTestDescriptor.swift
++++ b/CompanionLib/XCTest/XCTestDescriptor.swift
+@@ -148,7 +148,8 @@ final class XCTestBootstrapDescriptor: XCTestDescriptor, CustomStringConvertible
+       coverageDirectoryPath: coverageConfig?.coverageDirectory,
+       enableContinuousCoverageCollection: coverageConfig?.shouldEnableContinuousCoverageCollection ?? false,
+       logDirectoryPath: logDirectoryPath,
+-      reportResultBundle: request.collectResultBundle
++      reportResultBundle: request.collectResultBundle,
++      randomizeExecutionOrder: request.randomizeExecutionOrder
+     )
+     return IDBAppHostedTestConfiguration(testLaunchConfiguration: testLaunchConfig, coverageConfiguration: coverageConfig)
+   }
+diff --git a/CompanionLib/XCTest/XCTestRunRequest.swift b/CompanionLib/XCTest/XCTestRunRequest.swift
+index 2bb6534..4c22f01 100644
+--- a/CompanionLib/XCTest/XCTestRunRequest.swift
++++ b/CompanionLib/XCTest/XCTestRunRequest.swift
+@@ -69,6 +69,7 @@ public struct XCTestRunRequest {
+   public let collectLogs: Bool
+   public let waitForDebugger: Bool
+   public let collectResultBundle: Bool
++  public let randomizeExecutionOrder: Bool
  
- enum MultisourceFileReader {
- 
--  static func filePathURLs<Request: PayloadExtractable>(from requestStream: GRPCAsyncRequestStream<Request>, temporaryDirectory: FBTemporaryDirectory, extractFromSubdir: Bool) async throws -> [URL] {
-+  static func filePathURLs<Request: PayloadExtractable>(from requestStream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Request>>, temporaryDirectory: FBTemporaryDirectory, extractFromSubdir: Bool) async throws -> [URL] {
-     func readNextPayload() async throws -> Idb_Payload {
--      guard let p = try await requestStream.requiredNext.extractPayload()
-+      guard let p = try await requestStream.requiredNext.extractPayload()  // wrapper's single-iterator read
-       else { throw GRPCStatus(code: .failedPrecondition, message: "Incorrect request. Expected payload") }
-       return p
-     }
-@@ -59,10 +59,10 @@ enum MultisourceFileReader {
-     }
+   public var testBundleID: String? {
+     guard case let .identifier(identifier) = bundle else { return nil }
+@@ -105,7 +106,7 @@ public struct XCTestRunRequest {
+     return true
    }
  
--  private static func filepathsFromStream<Request: PayloadExtractable>(initial: URL, requestStream: GRPCAsyncRequestStream<Request>) async throws -> [URL] {
-+  private static func filepathsFromStream<Request: PayloadExtractable>(initial: URL, requestStream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Request>>) async throws -> [URL] {
-     var filePaths = [initial]
- 
--    for try await request in requestStream {
-+    while let request = try await requestStream.next() {
-       guard let payload = request.extractPayload()
-       else { throw GRPCStatus(code: .invalidArgument, message: "Unrecogized buffer frame. Expect payload, got \(request)") }
- 
-@@ -86,7 +86,7 @@ enum MultisourceFileReader {
+-  private init(bundle: BundleSource, mode: Mode, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, waitForDebugger: Bool, collectResultBundle: Bool) {
++  private init(bundle: BundleSource, mode: Mode, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, waitForDebugger: Bool, collectResultBundle: Bool, randomizeExecutionOrder: Bool) {
+     self.bundle = bundle
+     self.mode = mode
+     self.environment = environment
+@@ -119,32 +120,33 @@ public struct XCTestRunRequest {
+     self.collectLogs = collectLogs
+     self.waitForDebugger = waitForDebugger
+     self.collectResultBundle = collectResultBundle
++    self.randomizeExecutionOrder = randomizeExecutionOrder
    }
  
-   // TODO: Do we really need multithreading here? Isnt we just fill the stream sequentially while read is blocked and only then read starts?
--  private static func pipeToInput<Request: PayloadExtractable>(initialData: Data, requestStream: GRPCAsyncRequestStream<Request>) -> (Task<Void, Error>, FBProcessInput<OutputStream>) {
-+  private static func pipeToInput<Request: PayloadExtractable>(initialData: Data, requestStream: SingleIteratorRequestStream<GRPCAsyncRequestStream<Request>>) -> (Task<Void, Error>, FBProcessInput<OutputStream>) {
-     let input = FBProcessInput<OutputStream>.fromStream()
-     let stream = input.contents
+   // MARK: - Initializers
  
-@@ -97,7 +97,7 @@ enum MultisourceFileReader {
-       var buffer = [UInt8](initialData)
-       stream.write(&buffer, maxLength: buffer.count)
+-  public static func logicTest(withTestBundleID testBundleID: String, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, waitForDebugger: Bool, collectResultBundle: Bool) -> XCTestRunRequest {
+-    XCTestRunRequest(bundle: .identifier(testBundleID), mode: .logic, environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: waitForDebugger, collectResultBundle: collectResultBundle)
++  public static func logicTest(withTestBundleID testBundleID: String, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, waitForDebugger: Bool, collectResultBundle: Bool, randomizeExecutionOrder: Bool = false) -> XCTestRunRequest {
++    XCTestRunRequest(bundle: .identifier(testBundleID), mode: .logic, environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: waitForDebugger, collectResultBundle: collectResultBundle, randomizeExecutionOrder: randomizeExecutionOrder)
+   }
  
--      for try await request in requestStream {
-+      while let request = try await requestStream.next() {
-         guard let payload = request.extractPayload()
-         else { throw GRPCStatus(code: .invalidArgument, message: "Unrecogized buffer frame. Expect payload, got \(request)") }
+-  public static func logicTest(withTestPath testPath: URL, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, waitForDebugger: Bool, collectResultBundle: Bool) -> XCTestRunRequest {
+-    XCTestRunRequest(bundle: .path(testPath), mode: .logic, environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: waitForDebugger, collectResultBundle: collectResultBundle)
++  public static func logicTest(withTestPath testPath: URL, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, waitForDebugger: Bool, collectResultBundle: Bool, randomizeExecutionOrder: Bool = false) -> XCTestRunRequest {
++    XCTestRunRequest(bundle: .path(testPath), mode: .logic, environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: waitForDebugger, collectResultBundle: collectResultBundle, randomizeExecutionOrder: randomizeExecutionOrder)
+   }
  
-diff --git a/Companion/Utility/SingleIteratorRequestStream.swift b/Companion/Utility/SingleIteratorRequestStream.swift
+-  public static func applicationTest(withTestBundleID testBundleID: String, testHostAppBundleID: String, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, waitForDebugger: Bool, collectResultBundle: Bool) -> XCTestRunRequest {
+-    XCTestRunRequest(bundle: .identifier(testBundleID), mode: .application(testHostAppBundleID: testHostAppBundleID), environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: waitForDebugger, collectResultBundle: collectResultBundle)
++  public static func applicationTest(withTestBundleID testBundleID: String, testHostAppBundleID: String, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, waitForDebugger: Bool, collectResultBundle: Bool, randomizeExecutionOrder: Bool = false) -> XCTestRunRequest {
++    XCTestRunRequest(bundle: .identifier(testBundleID), mode: .application(testHostAppBundleID: testHostAppBundleID), environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: waitForDebugger, collectResultBundle: collectResultBundle, randomizeExecutionOrder: randomizeExecutionOrder)
+   }
+ 
+-  public static func applicationTest(withTestPath testPath: URL, testHostAppBundleID: String, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, waitForDebugger: Bool, collectResultBundle: Bool) -> XCTestRunRequest {
+-    XCTestRunRequest(bundle: .path(testPath), mode: .application(testHostAppBundleID: testHostAppBundleID), environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: waitForDebugger, collectResultBundle: collectResultBundle)
++  public static func applicationTest(withTestPath testPath: URL, testHostAppBundleID: String, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, waitForDebugger: Bool, collectResultBundle: Bool, randomizeExecutionOrder: Bool = false) -> XCTestRunRequest {
++    XCTestRunRequest(bundle: .path(testPath), mode: .application(testHostAppBundleID: testHostAppBundleID), environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: waitForDebugger, collectResultBundle: collectResultBundle, randomizeExecutionOrder: randomizeExecutionOrder)
+   }
+ 
+-  public static func uiTest(withTestBundleID testBundleID: String, testHostAppBundleID: String, testTargetAppBundleID: String, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, collectResultBundle: Bool) -> XCTestRunRequest {
+-    XCTestRunRequest(bundle: .identifier(testBundleID), mode: .ui(testHostAppBundleID: testHostAppBundleID, testTargetAppBundleID: testTargetAppBundleID), environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: false, collectResultBundle: collectResultBundle)
++  public static func uiTest(withTestBundleID testBundleID: String, testHostAppBundleID: String, testTargetAppBundleID: String, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, collectResultBundle: Bool, randomizeExecutionOrder: Bool = false) -> XCTestRunRequest {
++    XCTestRunRequest(bundle: .identifier(testBundleID), mode: .ui(testHostAppBundleID: testHostAppBundleID, testTargetAppBundleID: testTargetAppBundleID), environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: false, collectResultBundle: collectResultBundle, randomizeExecutionOrder: randomizeExecutionOrder)
+   }
+ 
+-  public static func uiTest(withTestPath testPath: URL, testHostAppBundleID: String, testTargetAppBundleID: String, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, collectResultBundle: Bool) -> XCTestRunRequest {
+-    XCTestRunRequest(bundle: .path(testPath), mode: .ui(testHostAppBundleID: testHostAppBundleID, testTargetAppBundleID: testTargetAppBundleID), environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: false, collectResultBundle: collectResultBundle)
++  public static func uiTest(withTestPath testPath: URL, testHostAppBundleID: String, testTargetAppBundleID: String, environment: [String: String], arguments: [String], testsToRun: Set<String>?, testsToSkip: Set<String>, testTimeout: TimeInterval?, reportActivities: Bool, reportAttachments: Bool, coverageRequest: CodeCoverageRequest, collectLogs: Bool, collectResultBundle: Bool, randomizeExecutionOrder: Bool = false) -> XCTestRunRequest {
++    XCTestRunRequest(bundle: .path(testPath), mode: .ui(testHostAppBundleID: testHostAppBundleID, testTargetAppBundleID: testTargetAppBundleID), environment: environment, arguments: arguments, testsToRun: testsToRun, testsToSkip: testsToSkip, testTimeout: testTimeout, reportActivities: reportActivities, reportAttachments: reportAttachments, coverageRequest: coverageRequest, collectLogs: collectLogs, waitForDebugger: false, collectResultBundle: collectResultBundle, randomizeExecutionOrder: randomizeExecutionOrder)
+   }
+ 
+   // MARK: - Test Execution
+diff --git a/CompanionLibTests/Tests/Unit/XCTest/IDBXCTestReporterTests.swift b/CompanionLibTests/Tests/Unit/XCTest/IDBXCTestReporterTests.swift
 new file mode 100644
-index 0000000..84e7ab9
+index 0000000..a1e9d7b
 --- /dev/null
-+++ b/Companion/Utility/SingleIteratorRequestStream.swift
-@@ -0,0 +1,38 @@
++++ b/CompanionLibTests/Tests/Unit/XCTest/IDBXCTestReporterTests.swift
+@@ -0,0 +1,58 @@
 +/*
 + * Copyright (c) Meta Platforms, Inc. and affiliates.
 + *
@@ -654,396 +150,771 @@ index 0000000..84e7ab9
 + * LICENSE file in the root directory of this source tree.
 + */
 +
-+/// Owns the single `AsyncIterator` of a gRPC request stream.
-+///
-+/// grpc-swift's `GRPCAsyncRequestStream` is backed by
-+/// `NIOThrowingAsyncSequenceProducer`, which fatal-errors if more than one
-+/// iterator is ever created from it. `AsyncSequence.requiredNext` reads via
-+/// `first(where:)`, and every `first(where:)` makes a *new* iterator — so any
-+/// handler that reads more than one request frame straight off the stream
-+/// (`requestStream.requiredNext` twice) crashes the whole companion on the
-+/// second read. Wrapping the stream once and reading every frame through this
-+/// type keeps all reads on one iterator.
-+final class SingleIteratorRequestStream<S: AsyncSequence>: @unchecked Sendable {
-+  private var iterator: S.AsyncIterator
++@testable import CompanionLib
++import FBControlCore
++import Foundation
++import GRPCCore
++import IDBGRPCSwift
++import Testing
 +
-+  init(_ sequence: S) {
-+    self.iterator = sequence.makeAsyncIterator()
++private struct WriterClosed: Error {}
++
++/// A response stream whose client has gone away: every write fails.
++private final class ClosedWriter<Element: Sendable>: RPCWriterProtocol, @unchecked Sendable {
++  func write(_ element: Element) async throws {
++    throw WriterClosed()
 +  }
 +
-+  func next() async throws -> S.Element? {
-+    try await iterator.next()
++  func write(contentsOf elements: some Sequence<Element>) async throws {
++    throw WriterClosed()
 +  }
++}
 +
-+  /// The next element, treating end-of-stream as a precondition failure.
-+  var requiredNext: S.Element {
-+    get async throws {
-+      guard let next = try await next() else {
-+        throw StreamReadError<S.Element>.nextElementNotProduced
-+      }
-+      return next
++private final class SilentLogger: ControlCoreLogger, @unchecked Sendable {
++  @discardableResult
++  func log(_ message: String) -> any ControlCoreLogger { self }
++  func info() -> any ControlCoreLogger { self }
++  func debug() -> any ControlCoreLogger { self }
++  func error() -> any ControlCoreLogger { self }
++  func withName(_ name: String) -> any ControlCoreLogger { self }
++  func withDateFormatEnabled(_ enabled: Bool) -> any ControlCoreLogger { self }
++  var name: String? { nil }
++  var level: ControlCoreLogLevel { .multiple }
++}
++
++@Suite
++struct IDBXCTestReporterTests {
++
++  /// The last response takes the stream out of the reporter before it is written, so nothing can
++  /// write after it. If that write fails, waiting for reporting to end has to fail with it rather
++  /// than wait for a response that can no longer arrive.
++  @Test(.timeLimit(.minutes(1)))
++  func aFailedLastResponseEndsReportingWithTheFailure() async {
++    let reporter = IDBXCTestReporter(
++      responseStream: RPCWriter(wrapping: ClosedWriter<Idb_XctestRunResponse>()),
++      logger: SilentLogger())
++
++    reporter.didFinishExecutingTestPlan()
++
++    await #expect(throws: WriterClosed.self) {
++      _ = try await reporter.awaitReportingTerminated()
 +    }
 +  }
 +}
-diff --git a/Companion/main.swift b/Companion/main.swift
-index 0e47def..abdef27 100644
---- a/Companion/main.swift
-+++ b/Companion/main.swift
-@@ -382,7 +382,7 @@ private func runCompanionServer(_ udid: String, userDefaults: UserDefaults, xcod
-       addMetadataSel,
-       with: [
-         "udid": udid,
--        "target_type": FBiOSTargetTypeStringFromTargetType(target.targetType).lowercased(),
-+        "target_type": String(FBiOSTargetTypeStringRepresentation(target.targetType)).lowercased(),
-       ])
-   }
-   reporter.report(FBEventReporterSubject(forEvent: "launched"))
-@@ -464,7 +464,16 @@ private func runCompanionServer(_ udid: String, userDefaults: UserDefaults, xcod
-   }
-   if terminateOffline {
-     nonisolated(unsafe) let target = target
--    raceTasks.append(Task { try await awaitTargetOffline(target, logger: logger) })
-+    nonisolated(unsafe) let logger = logger
-+    nonisolated(unsafe) let awaitOffline: @Sendable () async throws -> Void = { try await awaitTargetOffline(target, logger: logger) }
-+    // Task.detached rather than Task { }: the current toolchain's "sending"
-+    // region checker false-positives on this closure when constructed via
-+    // the ordinary (context-inheriting) initializer even after the
-+    // nonisolated(unsafe) rebind above; detaching sidesteps that inherited-
-+    // isolation code path. No behavioral loss here — the closure only awaits
-+    // a plain async call with already-captured values, it doesn't depend on
-+    // the caller's actor context.
-+    raceTasks.append(Task<Void, Error>.detached(operation: awaitOffline))
-   }
-   defer { raceTasks.forEach { $0.cancel() } }
-   _ = try await Task.select(raceTasks).value
-diff --git a/FBControlCore/Management/FBiOSTarget.h b/FBControlCore/Management/FBiOSTarget.h
-index 206a889..21152dc 100644
---- a/FBControlCore/Management/FBiOSTarget.h
-+++ b/FBControlCore/Management/FBiOSTarget.h
-@@ -26,7 +26,7 @@
- /**
-  The canonical string representation of the state enum.
-  */
--FOUNDATION_EXTERN FBiOSTargetStateString _Nonnull FBiOSTargetStateStringFromState(FBiOSTargetState state);
-+FOUNDATION_EXTERN FBiOSTargetStateString _Nonnull FBiOSTargetStateStringFromState(FBiOSTargetState state) NS_SWIFT_UNAVAILABLE("Use the FBControlCore Swift module declaration");
+diff --git a/FBXCTestCore/Configuration/TestConfiguration.swift b/FBXCTestCore/Configuration/TestConfiguration.swift
+index a99c350..47f188e 100644
+--- a/FBXCTestCore/Configuration/TestConfiguration.swift
++++ b/FBXCTestCore/Configuration/TestConfiguration.swift
+@@ -67,7 +67,8 @@ public enum TestConfigurationError: Error, LocalizedError {
+     targetApplicationBundleID: String?,
+     testApplicationDependencies: [String: String]?,
+     automationFrameworkPath: String?,
+-    reportActivities: Bool
++    reportActivities: Bool,
++    randomizeExecutionOrder: Bool = false
+   ) throws {
+     guard let configuration = RuntimeClassAllocation.new("XCTestConfiguration") as? NSObject else {
+       throw TestConfigurationError.classUnavailable(className: "XCTestConfiguration")
+@@ -85,6 +86,8 @@ public enum TestConfigurationError: Error, LocalizedError {
+     configuration.setValue(targetApplicationBundleID, forKey: "targetApplicationBundleID")
+     configuration.setValue(automationFrameworkPath, forKey: "automationFrameworkPath")
+     configuration.setValue(reportActivities, forKey: "reportActivities")
++    // The values of the TestExecutionOrdering key in an .xctestrun file: 0 is lexical, 1 is random.
++    configuration.setValue(randomizeExecutionOrder ? 1 : 0, forKey: "testExecutionOrdering")
+     configuration.setValue(false, forKey: "testsDrivenByIDE")
+     configuration.setValue(testApplicationDependencies, forKey: "testApplicationDependencies")
  
- /**
-  The canonical enum representation of the state string.
-@@ -36,7 +36,7 @@ FOUNDATION_EXTERN FBiOSTargetState FBiOSTargetStateFromStateString(FBiOSTargetSt
- /**
-  The canonical string representations of the FBiOSTargetType Enum.
-  */
--FOUNDATION_EXTERN NSString *_Nonnull FBiOSTargetTypeStringFromTargetType(FBiOSTargetType targetType);
-+FOUNDATION_EXTERN NSString *_Nonnull FBiOSTargetTypeStringFromTargetType(FBiOSTargetType targetType) NS_SWIFT_UNAVAILABLE("Use the FBControlCore Swift module declaration");
+@@ -141,8 +144,15 @@ public enum TestConfigurationError: Error, LocalizedError {
+     }
+     let builder = unsafeBitCast(builderInstance, to: XCTTestIdentifierSetBuilderMessaging.self)
+     for test in tests {
++      guard let allocatedIdentifier = RuntimeClassAllocation.alloc("XCTTestIdentifier") else {
++        throw TestConfigurationError.classUnavailable(className: "XCTTestIdentifier")
++      }
++      // XCTTestIdentifier is a class cluster: +alloc returns one shared placeholder, and its
++      // initializer returns a new identifier and releases the placeholder once more than +alloc
++      // retained it. Without this retain the placeholder is freed after the first identifier and the
++      // next +alloc crashes in objc_retain.
++      _ = Unmanaged.passUnretained(allocatedIdentifier).retain()
+       guard
+-        let allocatedIdentifier = RuntimeClassAllocation.alloc("XCTTestIdentifier"),
+         let identifier = unsafeBitCast(allocatedIdentifier, to: XCTTestIdentifierMessaging.self)
+           .initialize(stringRepresentation: test as NSString, preserveModulePrefix: true)
+       else {
+diff --git a/FBXCTestCore/Configuration/TestLaunchConfiguration.swift b/FBXCTestCore/Configuration/TestLaunchConfiguration.swift
+index 2985bc7..57c866e 100644
+--- a/FBXCTestCore/Configuration/TestLaunchConfiguration.swift
++++ b/FBXCTestCore/Configuration/TestLaunchConfiguration.swift
+@@ -26,8 +26,9 @@ public struct TestLaunchConfiguration {
+   public let shouldEnableContinuousCoverageCollection: Bool
+   public let logDirectoryPath: String?
+   public let reportResultBundle: Bool
++  public let randomizeExecutionOrder: Bool
  
- /**
-  A Default Comparison Function that can be called for different implementations of FBiOSTarget.
-diff --git a/FBControlCore/Management/FBiOSTarget.swift b/FBControlCore/Management/FBiOSTarget.swift
-index 75373fa..1e7a36d 100644
---- a/FBControlCore/Management/FBiOSTarget.swift
-+++ b/FBControlCore/Management/FBiOSTarget.swift
-@@ -108,7 +108,7 @@ import Foundation
- 
- /// The canonical string representation of the state enum.
- @_cdecl("FBiOSTargetStateStringFromState")
--func FBiOSTargetStateStringFromState(_ state: FBiOSTargetState) -> FBiOSTargetStateString {
-+public func FBiOSTargetStateStringRepresentation(_ state: FBiOSTargetState) -> FBiOSTargetStateString {
-   switch state {
-   case .creating:
-     return .creating
-@@ -166,7 +166,7 @@ func FBiOSTargetStateFromStateString(_ stateString: FBiOSTargetStateString) -> F
- 
- /// The canonical string representations of the FBiOSTargetType enum.
- @_cdecl("FBiOSTargetTypeStringFromTargetType")
--func FBiOSTargetTypeStringFromTargetType(_ targetType: FBiOSTargetType) -> NSString {
-+public func FBiOSTargetTypeStringRepresentation(_ targetType: FBiOSTargetType) -> NSString {
-   if targetType == .device {
-     return "Device"
-   }
-@@ -230,7 +230,7 @@ func FBiOSTargetComparison(_ left: FBiOSTarget, _ right: FBiOSTarget) -> Compari
- /// Constructs a string description of the provided target.
- @_cdecl("FBiOSTargetDescribe")
- func FBiOSTargetDescribe(_ target: FBiOSTargetInfo) -> NSString {
--  return "\(target.udid) | \(target.name) | \(FBiOSTargetStateStringFromState(target.state).rawValue) | \(target.deviceType.model.rawValue) | \(target.osVersion) " as NSString
-+  return "\(target.udid) | \(target.name) | \(FBiOSTargetStateStringRepresentation(target.state).rawValue) | \(target.deviceType.model.rawValue) | \(target.osVersion) " as NSString
- }
- 
- /// Constructs an NSPredicate matching the specified UDID.
-diff --git a/FBSimulatorControl/Commands/FBAXBridgeTransport.swift b/FBSimulatorControl/Commands/FBAXBridgeTransport.swift
-index aaed76f..0af31d2 100644
---- a/FBSimulatorControl/Commands/FBAXBridgeTransport.swift
-+++ b/FBSimulatorControl/Commands/FBAXBridgeTransport.swift
-@@ -144,31 +144,33 @@ struct FBAXBridgeOneshotTransport: FBAXBridgeTransport {
-   let simulator: FBSimulator
- 
-   func read(pid: pid_t, maxDepth: Int, maxNodes: Int, attributes: [String]?, explainUnreachable: Bool, traversal: FBAXTraversal, automationMode: Bool?) async throws -> Data {
--    try await spawn(
--      ["accessibility", FBAXWire.Verb.describe.rawValue]
--        + FBAXWire.Request.pid.argument("\(pid)")
--        + FBAXWire.Request.maxDepth.argument("\(maxDepth)")
--        + FBAXWire.Request.maxNodes.argument("\(maxNodes)")
--        + Self.attributeArgument(attributes)
--        + Self.explainArgument(explainUnreachable)
--        + Self.traversalArgument(traversal)
--        + Self.automationArgument(automationMode)
--    )
-+    // Built up statement-by-statement (rather than as one large `+`-chained
-+    // expression) so the type checker doesn't time out resolving the mix of
-+    // string-interpolation and [String]-returning helper calls.
-+    var arguments: [String] = ["accessibility", FBAXWire.Verb.describe.rawValue]
-+    arguments += FBAXWire.Request.pid.argument("\(pid)")
-+    arguments += FBAXWire.Request.maxDepth.argument("\(maxDepth)")
-+    arguments += FBAXWire.Request.maxNodes.argument("\(maxNodes)")
-+    arguments += Self.attributeArgument(attributes)
-+    arguments += Self.explainArgument(explainUnreachable)
-+    arguments += Self.traversalArgument(traversal)
-+    arguments += Self.automationArgument(automationMode)
-+    return try await spawn(arguments)
-   }
- 
-   func readFrontmost(x: Double, y: Double, maxDepth: Int, maxNodes: Int, method: FBAXBridgeFrontmostMethod, attributes: [String]?, explainUnreachable: Bool, traversal: FBAXTraversal, automationMode: Bool?) async throws -> Data {
--    try await spawn(
--      ["accessibility", FBAXWire.Verb.describe.rawValue]
--        + FBAXWire.Request.x.argument("\(x)")
--        + FBAXWire.Request.y.argument("\(y)")
--        + FBAXWire.Request.maxDepth.argument("\(maxDepth)")
--        + FBAXWire.Request.maxNodes.argument("\(maxNodes)")
--        + FBAXWire.Request.method.argument(method.rawValue)
--        + Self.attributeArgument(attributes)
--        + Self.explainArgument(explainUnreachable)
--        + Self.traversalArgument(traversal)
--        + Self.automationArgument(automationMode)
--    )
-+    // See `read(pid:...)` above for why this is built up statement-by-statement.
-+    var arguments: [String] = ["accessibility", FBAXWire.Verb.describe.rawValue]
-+    arguments += FBAXWire.Request.x.argument("\(x)")
-+    arguments += FBAXWire.Request.y.argument("\(y)")
-+    arguments += FBAXWire.Request.maxDepth.argument("\(maxDepth)")
-+    arguments += FBAXWire.Request.maxNodes.argument("\(maxNodes)")
-+    arguments += FBAXWire.Request.method.argument(method.rawValue)
-+    arguments += Self.attributeArgument(attributes)
-+    arguments += Self.explainArgument(explainUnreachable)
-+    arguments += Self.traversalArgument(traversal)
-+    arguments += Self.automationArgument(automationMode)
-+    return try await spawn(arguments)
-   }
- 
-   func hitTest(x: Double, y: Double, attributes: [String]?) async throws -> Data {
-diff --git a/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift b/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift
-index e09d935..b3fe268 100644
---- a/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift
-+++ b/FBSimulatorControl/Strategies/FBDefaultsModificationStrategy.swift
-@@ -25,7 +25,7 @@ enum DefaultsModificationError: Error, CustomStringConvertible {
-     case let .couldNotWritePlist(plist):
-       return "Failed to write out defaults to temporary file \(plist)"
-     case let .invalidState(state, action):
--      return "Cannot \(action) a plist when the Simulator state is \(FBiOSTargetStateStringFromState(state)), should be \(FBiOSTargetStateString.shutdown) or \(FBiOSTargetStateString.booted)"
-+      return "Cannot \(action) a plist when the Simulator state is \(FBiOSTargetStateStringRepresentation(state)), should be \(FBiOSTargetStateString.shutdown) or \(FBiOSTargetStateString.booted)"
-     case let .commandFailed(command, exitCode, stderr):
-       return "defaults \(command) failed with exit code \(exitCode): \(stderr)"
-     case .noDataDirectory:
-diff --git a/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift b/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift
-index 461f41f..4b49da2 100644
---- a/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift
-+++ b/FBSimulatorControlTests/Utilities/CoreSimulatorDoubles.swift
-@@ -54,7 +54,7 @@ class FBSimulatorControlTests_SimDevice_Double: NSObject {
-   }
- 
-   @objc var stateString: FBiOSTargetStateString {
--    return FBiOSTargetStateStringFromState(FBiOSTargetState(rawValue: UInt(state))!)
-+    return FBiOSTargetStateStringRepresentation(FBiOSTargetState(rawValue: UInt(state))!)
+-  public init(testBundle: BundleDescriptor, applicationLaunchConfiguration: ApplicationLaunchConfiguration, testHostBundle: BundleDescriptor?, timeout: TimeInterval, initializeUITesting: Bool, useXcodebuild: Bool, testsToRun: Set<String>?, testsToSkip: Set<String>?, targetApplicationBundle: BundleDescriptor?, xcTestRunProperties: [String: Any]?, resultBundlePath: String?, reportActivities: Bool, coverageDirectoryPath: String?, enableContinuousCoverageCollection: Bool, logDirectoryPath: String?, reportResultBundle: Bool) {
++  public init(testBundle: BundleDescriptor, applicationLaunchConfiguration: ApplicationLaunchConfiguration, testHostBundle: BundleDescriptor?, timeout: TimeInterval, initializeUITesting: Bool, useXcodebuild: Bool, testsToRun: Set<String>?, testsToSkip: Set<String>?, targetApplicationBundle: BundleDescriptor?, xcTestRunProperties: [String: Any]?, resultBundlePath: String?, reportActivities: Bool, coverageDirectoryPath: String?, enableContinuousCoverageCollection: Bool, logDirectoryPath: String?, reportResultBundle: Bool, randomizeExecutionOrder: Bool = false) {
+     self.testBundle = testBundle
+     self.applicationLaunchConfiguration = applicationLaunchConfiguration
+     self.testHostBundle = testHostBundle
+@@ -44,6 +45,7 @@ public struct TestLaunchConfiguration {
+     self.shouldEnableContinuousCoverageCollection = enableContinuousCoverageCollection
+     self.logDirectoryPath = logDirectoryPath
+     self.reportResultBundle = reportResultBundle
++    self.randomizeExecutionOrder = randomizeExecutionOrder
    }
  }
  
-diff --git a/XCTestBootstrap/Configuration/FBTestConfiguration.h b/XCTestBootstrap/Configuration/FBTestConfiguration.h
-index 7db7aa2..7df5eaf 100644
---- a/XCTestBootstrap/Configuration/FBTestConfiguration.h
-+++ b/XCTestBootstrap/Configuration/FBTestConfiguration.h
-@@ -31,7 +31,7 @@
-  @param error an error out for any error that occurs.
-  @return a test configuration after it has been written out to disk.
-  */
--+ (nullable instancetype)configurationByWritingToFileWithSessionIdentifier:(nonnull NSUUID *)sessionIdentifier moduleName:(nonnull NSString *)moduleName testBundlePath:(nonnull NSString *)testBundlePath uiTesting:(BOOL)uiTesting testsToRun:(nullable NSSet<NSString *> *)testsToRun testsToSkip:(nullable NSSet<NSString *> *)testsToSkip targetApplicationPath:(nullable NSString *)targetApplicationPath targetApplicationBundleID:(nullable NSString *)targetApplicationBundleID testApplicationDependencies:(nullable NSDictionary<NSString *, NSString *> *)testApplicationDependencies automationFrameworkPath:(nullable NSString *)automationFrameworkPath reportActivities:(BOOL)reportActivities error:(NSError * _Nullable * _Nullable)error;
-++ (nullable instancetype)configurationByWritingToFileWithSessionIdentifier:(nonnull NSUUID *)sessionIdentifier moduleName:(nonnull NSString *)moduleName testBundlePath:(nonnull NSString *)testBundlePath uiTesting:(BOOL)uiTesting testsToRun:(nullable NSSet<NSString *> *)testsToRun testsToSkip:(nullable NSSet<NSString *> *)testsToSkip targetApplicationPath:(nullable NSString *)targetApplicationPath targetApplicationBundleID:(nullable NSString *)targetApplicationBundleID testApplicationDependencies:(nullable NSDictionary<NSString *, NSString *> *)testApplicationDependencies automationFrameworkPath:(nullable NSString *)automationFrameworkPath reportActivities:(BOOL)reportActivities testExecutionOrdering:(long long)testExecutionOrdering error:(NSError * _Nullable * _Nullable)error;
+@@ -52,6 +54,6 @@ public struct TestLaunchConfiguration {
+ extension TestLaunchConfiguration: CustomStringConvertible {
  
- /**
-  Creates a Test Configuration.
-diff --git a/XCTestBootstrap/Configuration/FBTestConfiguration.m b/XCTestBootstrap/Configuration/FBTestConfiguration.m
-index 8b72a3f..1663e05 100644
---- a/XCTestBootstrap/Configuration/FBTestConfiguration.m
-+++ b/XCTestBootstrap/Configuration/FBTestConfiguration.m
-@@ -22,7 +22,7 @@
+   public var description: String {
+-    "TestLaunchConfiguration TestBundle \(testBundle) | AppConfig \(applicationLaunchConfiguration) | HostBundle \(testHostBundle.map(String.init(describing:)) ?? "(nil)") | UITesting \(shouldInitializeUITesting ? 1 : 0) | UseXcodebuild \(shouldUseXcodebuild ? 1 : 0) | TestsToRun \(testsToRun.map(String.init(describing:)) ?? "(nil)") | TestsToSkip \(testsToSkip.map(String.init(describing:)) ?? "(nil)") | Target application bundle \(targetApplicationBundle.map(String.init(describing:)) ?? "(nil)") xcTestRunProperties \(xcTestRunProperties.map(String.init(describing:)) ?? "(nil)") | ResultBundlePath \(resultBundlePath ?? "(nil)") | CoverageDirPath \(coverageDirectoryPath ?? "(nil)") | EnableContinuousCoverageCollection \(shouldEnableContinuousCoverageCollection ? 1 : 0) | LogDirectoryPath \(logDirectoryPath ?? "(nil)") | ReportResultBundle \(reportResultBundle ? 1 : 0)"
++    "TestLaunchConfiguration TestBundle \(testBundle) | AppConfig \(applicationLaunchConfiguration) | HostBundle \(testHostBundle.map(String.init(describing:)) ?? "(nil)") | UITesting \(shouldInitializeUITesting ? 1 : 0) | UseXcodebuild \(shouldUseXcodebuild ? 1 : 0) | TestsToRun \(testsToRun.map(String.init(describing:)) ?? "(nil)") | TestsToSkip \(testsToSkip.map(String.init(describing:)) ?? "(nil)") | Target application bundle \(targetApplicationBundle.map(String.init(describing:)) ?? "(nil)") xcTestRunProperties \(xcTestRunProperties.map(String.init(describing:)) ?? "(nil)") | ResultBundlePath \(resultBundlePath ?? "(nil)") | CoverageDirPath \(coverageDirectoryPath ?? "(nil)") | EnableContinuousCoverageCollection \(shouldEnableContinuousCoverageCollection ? 1 : 0) | LogDirectoryPath \(logDirectoryPath ?? "(nil)") | ReportResultBundle \(reportResultBundle ? 1 : 0) | RandomizeExecutionOrder \(randomizeExecutionOrder ? 1 : 0)"
+   }
+ }
+diff --git a/FBXCTestCore/Configuration/TestRunnerConfiguration.swift b/FBXCTestCore/Configuration/TestRunnerConfiguration.swift
+index 19610a8..cb66933 100644
+--- a/FBXCTestCore/Configuration/TestRunnerConfiguration.swift
++++ b/FBXCTestCore/Configuration/TestRunnerConfiguration.swift
+@@ -71,12 +71,13 @@ struct TestRunnerConfiguration {
  
- @implementation FBTestConfiguration
+   // MARK: - Public
  
--+ (nullable instancetype)configurationByWritingToFileWithSessionIdentifier:(NSUUID *)sessionIdentifier moduleName:(NSString *)moduleName testBundlePath:(NSString *)testBundlePath uiTesting:(BOOL)uiTesting testsToRun:(nullable NSSet<NSString *> *)testsToRun testsToSkip:(nullable NSSet<NSString *> *)testsToSkip targetApplicationPath:(nullable NSString *)targetApplicationPath targetApplicationBundleID:(nullable NSString *)targetApplicationBundleID testApplicationDependencies:(nullable NSDictionary<NSString *, NSString *> *)testApplicationDependencies automationFrameworkPath:(nullable NSString *)automationFrameworkPath reportActivities:(BOOL)reportActivities error:(NSError * _Nullable * _Nullable)error
-++ (nullable instancetype)configurationByWritingToFileWithSessionIdentifier:(NSUUID *)sessionIdentifier moduleName:(NSString *)moduleName testBundlePath:(NSString *)testBundlePath uiTesting:(BOOL)uiTesting testsToRun:(nullable NSSet<NSString *> *)testsToRun testsToSkip:(nullable NSSet<NSString *> *)testsToSkip targetApplicationPath:(nullable NSString *)targetApplicationPath targetApplicationBundleID:(nullable NSString *)targetApplicationBundleID testApplicationDependencies:(nullable NSDictionary<NSString *, NSString *> *)testApplicationDependencies automationFrameworkPath:(nullable NSString *)automationFrameworkPath reportActivities:(BOOL)reportActivities testExecutionOrdering:(long long)testExecutionOrdering error:(NSError * _Nullable * _Nullable)error
- {
-   // Construct the XCTestConfiguration class.
-   XCTestConfiguration *testConfiguration = [objc_lookUpClass("XCTestConfiguration") new];
-@@ -39,6 +39,9 @@ + (nullable instancetype)configurationByWritingToFileWithSessionIdentifier:(NSUU
-   testConfiguration.automationFrameworkPath = automationFrameworkPath;
-   testConfiguration.reportActivities = reportActivities;
-   testConfiguration.testsDrivenByIDE = NO;
-+  // 0 = default (lexical) ordering, 1 = random. Same values as the
-+  // TestExecutionOrdering key in an .xctestrun file.
-+  testConfiguration.testExecutionOrdering = testExecutionOrdering;
-   testConfiguration.testApplicationDependencies = testApplicationDependencies;
- 
-   XCTCapabilitiesBuilder *capabilitiesBuilder = [objc_lookUpClass("XCTCapabilitiesBuilder") new];
-diff --git a/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift b/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
-index 3276f56..ba7b6bc 100644
---- a/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
-+++ b/XCTestBootstrap/Configuration/FBTestRunnerConfiguration.swift
-@@ -96,6 +96,11 @@ public struct FBTestRunnerConfiguration {
-       (developerLibraryPath as NSString).appendingPathComponent("Frameworks"),
+-  public static func launchEnvironment(withHostApplication hostApplication: BundleDescriptor, hostApplicationAdditionalEnvironment: [String: String], testBundle: BundleDescriptor, testConfigurationPath: String, frameworkSearchPaths: [String]) -> [String: String] {
++  public static func launchEnvironment(withHostApplication hostApplication: BundleDescriptor, hostApplicationAdditionalEnvironment: [String: String], testBundle: BundleDescriptor, testConfigurationPath: String, frameworkSearchPaths: [String], librarySearchPaths: [String] = []) -> [String: String] {
+     var environmentVariables = hostApplicationAdditionalEnvironment
+     let frameworkSearchPath = frameworkSearchPaths.joined(separator: ":")
++    let librarySearchPath = (frameworkSearchPaths + librarySearchPaths).joined(separator: ":")
+     environmentVariables["AppTargetLocation"] = hostApplication.binary?.path ?? ""
+-    environmentVariables["DYLD_FALLBACK_FRAMEWORK_PATH"] = frameworkSearchPath.isEmpty ? "" : frameworkSearchPath
+-    environmentVariables["DYLD_FALLBACK_LIBRARY_PATH"] = frameworkSearchPath.isEmpty ? "" : frameworkSearchPath
++    environmentVariables["DYLD_FALLBACK_FRAMEWORK_PATH"] = frameworkSearchPath
++    environmentVariables["DYLD_FALLBACK_LIBRARY_PATH"] = librarySearchPath
+     environmentVariables["OBJC_DISABLE_GC"] = "YES"
+     environmentVariables["TestBundleLocation"] = testBundle.path
+     environmentVariables["XCODE_DBG_XPC_EXCLUSIONS"] = "com.apple.dt.xctestSymbolicator"
+@@ -121,6 +122,12 @@ struct TestRunnerConfiguration {
        (developerLibraryPath as NSString).appendingPathComponent("PrivateFrameworks"),
        platformDeveloperFrameworksPath,
-+      // Contains libXCTestSwiftSupport.dylib and libXCTestBundleInject.dylib,
-+      // which Swift test bundles link via @rpath. This path lands in
-+      // DYLD_FALLBACK_LIBRARY_PATH, mirroring the DYLD_LIBRARY_PATH that
-+      // Xcode's own xctestrun-based runners set.
-+      (platformRoot as NSString).appendingPathComponent("Developer/usr/lib"),
      ]
++    // Contains libXCTestSwiftSupport.dylib, which Swift test bundles link through @rpath. Xcode's
++    // own runners put this directory on the host's library search path; without it, a Swift test
++    // bundle fails to load.
++    let xcTestLibrarySearchPaths = [
++      (platformRoot as NSString).appendingPathComponent("Developer/usr/lib"),
++    ]
  
      let automationFrameworkPath = (developerLibraryPath as NSString).appendingPathComponent("PrivateFrameworks/XCTAutomationSupport.framework")
-@@ -142,7 +147,10 @@ public struct FBTestRunnerConfiguration {
+     let automationFrameworkPathOrNil: String? = FileManager.default.fileExists(atPath: automationFrameworkPath) ? automationFrameworkPath : nil
+@@ -160,7 +167,8 @@ struct TestRunnerConfiguration {
          targetApplicationBundleID: testLaunchConfiguration.targetApplicationBundle?.identifier,
          testApplicationDependencies: testApplicationDependencies,
          automationFrameworkPath: automationFrameworkPathOrNil,
 -        reportActivities: testLaunchConfiguration.reportActivities
 +        reportActivities: testLaunchConfiguration.reportActivities,
-+        // Requested through the launch environment so that clients can opt
-+        // into random ordering without a protocol change.
-+        testExecutionOrdering: testLaunchConfiguration.applicationLaunchConfiguration.environment["FB_XCTEST_EXECUTION_ORDERING"] == "random" ? 1 : 0
++        randomizeExecutionOrder: testLaunchConfiguration.randomizeExecutionOrder
        )
      } catch {
-       throw
-diff --git a/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift b/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift
-index 4aa5eaa..8fb685b 100644
---- a/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift
-+++ b/XCTestBootstrap/Strategies/FBManagedTestRunStrategy.swift
-@@ -61,7 +61,15 @@ public final class FBManagedTestRunStrategy {
-   private static func environment(fromConfiguration configuration: FBTestRunnerConfiguration, environment: [String: String]) -> [String: String] {
-     var mEnvironment = configuration.launchEnvironment
-     for (key, value) in environment {
+       throw TestRunnerConfigurationError.testConfigurationPreparationFailed(underlying: error)
+@@ -198,7 +206,8 @@ struct TestRunnerConfiguration {
+       hostApplicationAdditionalEnvironment: hostApplicationAdditionalEnvironment,
+       testBundle: testBundle,
+       testConfigurationPath: testConfiguration.path,
+-      frameworkSearchPaths: frameworkSearchPaths
++      frameworkSearchPaths: frameworkSearchPaths,
++      librarySearchPaths: xcTestLibrarySearchPaths
+     )
+ 
+     testedApplicationAdditionalEnvironment = audioInjectionTestedApplicationEnvironment(
+diff --git a/FBXCTestCore/Runners/ManagedTestRunner.swift b/FBXCTestCore/Runners/ManagedTestRunner.swift
+index ed20d7d..a59d206 100644
+--- a/FBXCTestCore/Runners/ManagedTestRunner.swift
++++ b/FBXCTestCore/Runners/ManagedTestRunner.swift
+@@ -71,9 +71,23 @@ public enum ManagedTestRunner {
+   }
+ 
+   private static func environment(fromConfiguration configuration: TestRunnerConfiguration, environment: [String: String]) -> [String: String] {
+-    var mEnvironment = configuration.launchEnvironment
+-    for (key, value) in environment {
 -      mEnvironment[key] = value
-+      // The launch environment already carries the DYLD path variables that
-+      // test bootstrapping depends on (e.g. the shim in
-+      // DYLD_INSERT_LIBRARIES); requests may extend them (sanitizer
-+      // runtimes, extra search paths) but must not replace them.
++    mergedEnvironment(launchEnvironment: configuration.launchEnvironment, requestEnvironment: environment)
++  }
++
++  /// The request's environment layered over the runner's launch environment.
++  ///
++  /// A request's `DYLD_` variable extends the runner's value rather than replacing it: the launch
++  /// environment's `DYLD_INSERT_LIBRARIES` carries the shim that starts XCTest, and its
++  /// `DYLD_FALLBACK_*` paths are where XCTest is found. A request inserting a sanitizer runtime, or
++  /// adding a search path, needs both its own value and the runner's to take effect.
++  static func mergedEnvironment(launchEnvironment: [String: String], requestEnvironment: [String: String]) -> [String: String] {
++    var mEnvironment = launchEnvironment
++    for (key, value) in requestEnvironment {
 +      if key.hasPrefix("DYLD_"), let existing = mEnvironment[key], !existing.isEmpty, !value.isEmpty {
-+        mEnvironment[key] = existing + ":" + value
++        mEnvironment[key] = "\(existing):\(value)"
 +      } else {
 +        mEnvironment[key] = value
 +      }
      }
      return mEnvironment
    }
-diff --git a/XCTestBootstrap/TestManager/FBRemoteInvoking.swift b/XCTestBootstrap/TestManager/FBRemoteInvoking.swift
-index d2a63aa..1733c2e 100644
---- a/XCTestBootstrap/TestManager/FBRemoteInvoking.swift
-+++ b/XCTestBootstrap/TestManager/FBRemoteInvoking.swift
-@@ -217,8 +217,8 @@ func awaitRemoteReceipt(
-           // this call site, so the already-declared transfer is restated locally. Delete
-           // this binding once toolchains honor the declaration again.
-           // patternlint-disable-next-line swift-nonisolated-unsafe
--          nonisolated(unsafe) let value = value
--          bridge.resolve(.success(value))
-+          nonisolated(unsafe) let outcome: Result<Any?, Error> = .success(value)
-+          bridge.resolve(outcome)
-         }
-       }
+diff --git a/FBXCTestCore/TestManager/TestBundleConnection.swift b/FBXCTestCore/TestManager/TestBundleConnection.swift
+index e5bae07..aff4a0d 100644
+--- a/FBXCTestCore/TestManager/TestBundleConnection.swift
++++ b/FBXCTestCore/TestManager/TestBundleConnection.swift
+@@ -8,9 +8,6 @@
+ @preconcurrency import FBControlCore
+ import Foundation
+ 
+-private let bundleReadyTimeout: TimeInterval = 60
+-private let ideInterfaceReadyTimeout: TimeInterval = 60
+-private let daemonSessionReadyTimeout: TimeInterval = 60
+ private let crashCheckWaitLimit: TimeInterval = 120
+ 
+ enum TestBundleConnectionError: Error {
+@@ -155,7 +152,7 @@ final class TestBundleConnection {
+       core.setupAndStartSession()
+       try await Self.waitForSession(events)
+       logger.log("Waiting for test bundle to be ready..")
+-      try await events.bundleReady.wait(timeout: bundleReadyTimeout, waitingFor: "Bundle Ready to be called")
++      try await events.bundleReady.wait(timeout: TestBundleConnectionTimeouts.bundleReady, waitingFor: "Bundle Ready to be called")
+     } catch {
+       throw await self.diagnosedConnectionError(from: error)
      }
-diff --git a/XCTestBootstrap/TestManager/FBTestBundleConnection.swift b/XCTestBootstrap/TestManager/FBTestBundleConnection.swift
-index 4fd48a2..82d567f 100644
---- a/XCTestBootstrap/TestManager/FBTestBundleConnection.swift
-+++ b/XCTestBootstrap/TestManager/FBTestBundleConnection.swift
-@@ -26,11 +26,14 @@ enum FBTestBundleConnectionError: Error {
-   case connectionLost(message: String)
-   case processStillRunning(processIdentifier: pid_t)
-   case unexpectedCrashLookupResult(processIdentifier: pid_t)
-+  case hostExitedBeforeBundleReady
- }
- 
- extension FBTestBundleConnectionError: LocalizedError {
-   var errorDescription: String? {
-     switch self {
-+    case .hostExitedBeforeBundleReady:
-+      return "Error while establishing connection to test bundle: the test host process exited before the test bundle connected, so it cannot become ready."
-     case .hostRelaunchedByOS:
-       return "Error while establishing connection to test bundle: Running test host application pid is different from the pid launched and set up to execute the tests. The host application is likely to have crashed during startup and been relaunched by iOS."
-     case let .hostStalled(processIdentifier, stackshot):
-diff --git a/XCTestBootstrap/TestManager/FBTestBundleDTXConnection.m b/XCTestBootstrap/TestManager/FBTestBundleDTXConnection.m
-index 60c285c..97b3226 100644
---- a/XCTestBootstrap/TestManager/FBTestBundleDTXConnection.m
-+++ b/XCTestBootstrap/TestManager/FBTestBundleDTXConnection.m
-@@ -39,6 +39,21 @@
- static NSTimeInterval const IDEInterfaceReadyTimeout = 60; // Time for `XCTestManager_IDEInterface` to be returned.
- static NSTimeInterval const DaemonSessionReadyTimeout = 60; // Time for `_IDE_initiateSessionWithIdentifier` to be returned.
- 
-+// These bound how long a *failed* startup takes to be reported: a host that
-+// crashes before the bundle connects is only noticed once they expire, and a
-+// caller that already knows its own deadline has no way to shorten that.
-+// `FBXCTEST_CRASH_WAIT_TIMEOUT` sets the same precedent for the crash-log wait
-+// in FBTestBundleConnection.
-+static NSTimeInterval FBXCTestBootstrapTimeout(NSString *variable, NSTimeInterval fallback)
-+{
-+  NSString *value = NSProcessInfo.processInfo.environment[variable];
-+  if (value.length == 0) {
-+    return fallback;
-+  }
-+  NSTimeInterval parsed = value.doubleValue;
-+  return parsed > 0 ? parsed : fallback;
-+}
+@@ -177,10 +174,10 @@ final class TestBundleConnection {
+   private static func waitForSession(_ events: TestBundleEvents) async throws {
+     try await withThrowingTaskGroup(of: Void.self) { group in
+       group.addTask {
+-        try await events.proxyChannelOpened.wait(timeout: ideInterfaceReadyTimeout, waitingFor: "XCTestManager_IDEInterface to be ready")
++        try await events.proxyChannelOpened.wait(timeout: TestBundleConnectionTimeouts.ideInterfaceReady, waitingFor: "XCTestManager_IDEInterface to be ready")
+       }
+       group.addTask {
+-        try await events.sessionStarted.wait(timeout: daemonSessionReadyTimeout, waitingFor: "testmanagerd to start the test session")
++        try await events.sessionStarted.wait(timeout: TestBundleConnectionTimeouts.daemonSessionReady, waitingFor: "testmanagerd to start the test session")
+       }
+       try await group.waitForAll()
+     }
+diff --git a/FBXCTestCore/TestManager/TestBundleConnectionTimeouts.swift b/FBXCTestCore/TestManager/TestBundleConnectionTimeouts.swift
+new file mode 100644
+index 0000000..9ecb854
+--- /dev/null
++++ b/FBXCTestCore/TestManager/TestBundleConnectionTimeouts.swift
+@@ -0,0 +1,46 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * This source code is licensed under the MIT license found in the
++ * LICENSE file in the root directory of this source tree.
++ */
 +
- #pragma clang diagnostic push
- #pragma clang diagnostic ignored "-Wprotocol"
- #pragma clang diagnostic ignored "-Wincomplete-implementation"
-@@ -187,7 +202,7 @@ - (void)forwardInvocation:(NSInvocation *)invocation
- - (FBFuture<NSNull *> *)waitForBundleReady
- {
-   [self.logger log:@"Waiting for test bundle to be ready.."];
--  return [self.bundleReadyFuture timeout:BundleReadyTimeout waitingFor:@"Bundle Ready to be called"];
-+  return [self.bundleReadyFuture timeout:FBXCTestBootstrapTimeout(@"FBXCTEST_BUNDLE_READY_TIMEOUT", BundleReadyTimeout) waitingFor:@"Bundle Ready to be called"];
- }
++import Foundation
++
++/// How long each step of connecting to a test bundle may take before it fails.
++///
++/// These bound how long a failed startup takes to be reported: a host that dies before its bundle
++/// connects is only noticed once the step it was in times out. A caller that has its own deadline
++/// can shorten them with the environment variables named here, in the same way that
++/// `FBXCTEST_CRASH_WAIT_TIMEOUT` bounds the crash log wait in `TestBundleConnection`.
++enum TestBundleConnectionTimeouts {
++
++  static let bundleReadyVariable = "FBXCTEST_BUNDLE_READY_TIMEOUT"
++  static let ideInterfaceReadyVariable = "FBXCTEST_IDE_INTERFACE_TIMEOUT"
++  static let daemonSessionReadyVariable = "FBXCTEST_DAEMON_SESSION_TIMEOUT"
++  static let defaultTimeout: TimeInterval = 60
++
++  /// Time for `_XCT_testBundleReadyWithProtocolVersion` to be called after the 'connect'.
++  static var bundleReady: TimeInterval {
++    timeout(bundleReadyVariable)
++  }
++
++  /// Time for `XCTestManager_IDEInterface` to be returned.
++  static var ideInterfaceReady: TimeInterval {
++    timeout(ideInterfaceReadyVariable)
++  }
++
++  /// Time for testmanagerd to start the test session.
++  static var daemonSessionReady: TimeInterval {
++    timeout(daemonSessionReadyVariable)
++  }
++
++  /// The timeout `variable` names in `environment`, or the default when it is unset or is not a
++  /// positive number of seconds.
++  static func timeout(_ variable: String, environment: [String: String] = ProcessInfo.processInfo.environment) -> TimeInterval {
++    guard let value = environment[variable].flatMap(TimeInterval.init), value > 0, value.isFinite else {
++      return defaultTimeout
++    }
++    return value
++  }
++}
+diff --git a/FBXCTestCore/TestManager/TestManagerAPIMediator.swift b/FBXCTestCore/TestManager/TestManagerAPIMediator.swift
+index b65eb36..d668a43 100644
+--- a/FBXCTestCore/TestManager/TestManagerAPIMediator.swift
++++ b/FBXCTestCore/TestManager/TestManagerAPIMediator.swift
+@@ -122,7 +122,7 @@ public final class TestManagerAPIMediator: NSObject, @unchecked Sendable {
+           )
+           try await connection.connectAndRun()
+         }
+-        try await self.terminateSpawnedProcesses()
++        await self.terminateSpawnedProcesses()
+         _ = try? await launchedApplication.terminate()
+         return .completed
+       }
+@@ -140,7 +140,7 @@ public final class TestManagerAPIMediator: NSObject, @unchecked Sendable {
+     case .timedOut:
+       logger.log("Timed out after \(timeout), attempting stack sample")
+       let stackshot = (try? await sampleStack(forProcessIdentifier: launchedApplication.processIdentifier)) ?? "<no stackshot>"
+-      try? await terminateSpawnedProcesses()
++      await terminateSpawnedProcesses()
+       throw TestManagerError.hostProcessStalled(timeout: timeout, processIdentifier: launchedApplication.processIdentifier, stackshot: stackshot)
+     }
+   }
+@@ -171,14 +171,20 @@ public final class TestManagerAPIMediator: NSObject, @unchecked Sendable {
+     return apps
+   }
  
- - (void)startExecutingTestPlan
-@@ -223,7 +238,7 @@ - (BOOL)testPlanCompleted
-   [self.logger log:@"Resuming the test bundle connection."];
-   [connection resume];
- 
--  return [future timeout:IDEInterfaceReadyTimeout waitingFor:@"XCTestManager_IDEInterface to be ready"];
-+  return [future timeout:FBXCTestBootstrapTimeout(@"FBXCTEST_IDE_INTERFACE_TIMEOUT", IDEInterfaceReadyTimeout) waitingFor:@"XCTestManager_IDEInterface to be ready"];
- }
- 
- - (FBFuture<NSNumber *> *)sendStartSessionRequestWithConnection:(DTXConnection *)connection
-@@ -258,7 +273,7 @@ - (BOOL)testPlanCompleted
-     [future resolveWithResult:version];
-   }];
- 
--  return [future timeout:DaemonSessionReadyTimeout waitingFor:[NSString stringWithFormat:@"%@ to be resolved", sessionStartMethod]];
-+  return [future timeout:FBXCTestBootstrapTimeout(@"FBXCTEST_DAEMON_SESSION_TIMEOUT", DaemonSessionReadyTimeout) waitingFor:[NSString stringWithFormat:@"%@ to be resolved", sessionStartMethod]];
- }
- 
- - (void)concludeWithError:(NSError *)error
-diff --git a/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift b/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift
-index 7945ff8..82730fd 100644
---- a/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift
-+++ b/XCTestBootstrap/TestManager/FBTestManagerAPIMediator.swift
-@@ -167,7 +167,14 @@ public final class FBTestManagerAPIMediator: NSObject, @unchecked Sendable {
+-  private func terminateSpawnedProcesses() async throws {
++  private func terminateSpawnedProcesses() async {
+     let appsToKill = drainSpawnedApplications()
+     if appsToKill.isEmpty {
+       return
      }
      logger.log("Terminating processes spawned due to test bundle requests: \(appsToKill.map(\.bundleID))")
      for app in appsToKill {
--      try await target.killApplication(bundleID: app.bundleID)
+-      try await target.application.kill(bundleID: app.bundleID)
++      // An app the tests launched has often exited by now: the tests terminated it, or it quit when
++      // the session ended. Failing to kill it is not a failure of the run.
 +      do {
-+        try await target.killApplication(bundleID: app.bundleID)
++        try await target.application.kill(bundleID: app.bundleID)
 +      } catch {
-+        // The app may already have exited (e.g. the test terminated it, or
-+        // it quit when the session ended); failing to kill it during
-+        // teardown must not fail an otherwise-successful test run.
-+        logger.log("Ignoring failure to terminate \(app.bundleID) during teardown: \(error)")
++        logger.log("Ignoring failure to terminate \(app.bundleID): \(error)")
 +      }
      }
    }
  
+diff --git a/FBXCTestCoreTests/Tests/Unit/Configuration/TestConfigurationTests.swift b/FBXCTestCoreTests/Tests/Unit/Configuration/TestConfigurationTests.swift
+index 3119fb3..ceb9820 100644
+--- a/FBXCTestCoreTests/Tests/Unit/Configuration/TestConfigurationTests.swift
++++ b/FBXCTestCoreTests/Tests/Unit/Configuration/TestConfigurationTests.swift
+@@ -41,9 +41,52 @@ struct TestConfigurationTests {
+     #expect(TestConfigurationTestHelper.targetApplicationPath(xcTestConfig) == "targetAppPath")
+     #expect(TestConfigurationTestHelper.targetApplicationBundleID(xcTestConfig) == "targetBundleID")
+     #expect(TestConfigurationTestHelper.reportActivities(xcTestConfig) == false)
++    #expect(TestConfigurationTestHelper.testExecutionOrdering(xcTestConfig) == 0)
+     #expect(TestConfigurationTestHelper.reportResults(toIDE: xcTestConfig) == true)
+ 
+     let capabilities: NSDictionary = ["XCTIssue capability": 1, "ubiquitous test identifiers": 1]
+     #expect(TestConfigurationTestHelper.ideCapabilitiesDictionary(xcTestConfig)! as NSDictionary == capabilities)
+   }
++
++  @Test
++  func randomizedExecutionOrder() throws {
++    let testConfiguration = try TestConfigurationTestHelper.createTestConfigurationByWritingToFile(
++      withSessionIdentifier: UUID(),
++      moduleName: "ModuleName",
++      testBundlePath: NSTemporaryDirectory(),
++      uiTesting: false,
++      testsToRun: nil,
++      testsToSkip: nil,
++      targetApplicationPath: nil,
++      targetApplicationBundleID: nil,
++      testApplicationDependencies: nil,
++      automationFrameworkPath: nil,
++      reportActivities: false,
++      randomizeExecutionOrder: true
++    )
++
++    let xcTestConfig = try #require(TestConfigurationTestHelper.xcTestConfiguration(testConfiguration))
++    #expect(TestConfigurationTestHelper.testExecutionOrdering(xcTestConfig) == 1)
++  }
++
++  @Test
++  func testsToRunAndSkipBecomeTestIdentifierSets() throws {
++    let testConfiguration = try TestConfigurationTestHelper.createTestConfigurationByWritingToFile(
++      withSessionIdentifier: UUID(),
++      moduleName: "ModuleName",
++      testBundlePath: NSTemporaryDirectory(),
++      uiTesting: false,
++      testsToRun: ["Suite/testA", "Suite/testB"],
++      testsToSkip: ["Suite/testC"],
++      targetApplicationPath: nil,
++      targetApplicationBundleID: nil,
++      testApplicationDependencies: nil,
++      automationFrameworkPath: nil,
++      reportActivities: false
++    )
++
++    let xcTestConfig = try #require(TestConfigurationTestHelper.xcTestConfiguration(testConfiguration) as? NSObject)
++    #expect(xcTestConfig.value(forKey: "testsToRun") != nil)
++    #expect(xcTestConfig.value(forKey: "testsToSkip") != nil)
++  }
+ }
+diff --git a/FBXCTestCoreTests/Tests/Unit/Configuration/TestRunnerConfigurationTests.swift b/FBXCTestCoreTests/Tests/Unit/Configuration/TestRunnerConfigurationTests.swift
+index 0ef7b49..87e5581 100644
+--- a/FBXCTestCoreTests/Tests/Unit/Configuration/TestRunnerConfigurationTests.swift
++++ b/FBXCTestCoreTests/Tests/Unit/Configuration/TestRunnerConfigurationTests.swift
+@@ -85,4 +85,21 @@ struct TestRunnerConfigurationTests {
+     #expect(explicitZero["DYLD_INSERT_LIBRARIES"] == "bootstrap")
+     #expect(explicitZero["LLVM_PROFILE_FILE"] == "coverage")
+   }
++
++  @Test
++  func launchEnvironmentSearchesLibraryPathsForLibrariesOnly() {
++    let hostApplication = BundleDescriptor(name: "HostApplicationName", identifier: "HostApplicationIdentifier", path: "/blackhole/pray.app", binary: nil)
++    let testBundle = BundleDescriptor(name: "TestBundleName", identifier: "TestBundleIdentifier", path: "/blackhole/xctwda.xctest", binary: nil)
++
++    let actual = TestRunnerConfiguration.launchEnvironment(
++      withHostApplication: hostApplication,
++      hostApplicationAdditionalEnvironment: [:],
++      testBundle: testBundle,
++      testConfigurationPath: "/booo/magic.xctestconfiguration",
++      frameworkSearchPaths: ["/Apple", "/Orange"],
++      librarySearchPaths: ["/Platform/Developer/usr/lib"]
++    )
++    #expect(actual["DYLD_FALLBACK_FRAMEWORK_PATH"] == "/Apple:/Orange")
++    #expect(actual["DYLD_FALLBACK_LIBRARY_PATH"] == "/Apple:/Orange:/Platform/Developer/usr/lib")
++  }
+ }
+diff --git a/FBXCTestCoreTests/Tests/Unit/Runners/ManagedTestRunnerTests.swift b/FBXCTestCoreTests/Tests/Unit/Runners/ManagedTestRunnerTests.swift
+new file mode 100644
+index 0000000..a0a1972
+--- /dev/null
++++ b/FBXCTestCoreTests/Tests/Unit/Runners/ManagedTestRunnerTests.swift
+@@ -0,0 +1,57 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * This source code is licensed under the MIT license found in the
++ * LICENSE file in the root directory of this source tree.
++ */
++
++@testable import FBXCTestCore
++import Testing
++
++@Suite
++struct ManagedTestRunnerTests {
++
++  @Test
++  func requestEnvironmentOverridesLaunchEnvironment() {
++    let actual = ManagedTestRunner.mergedEnvironment(
++      launchEnvironment: ["SHIMULATOR_START_XCTEST": "1", "KEPT": "launch"],
++      requestEnvironment: ["SHIMULATOR_START_XCTEST": "0", "ADDED": "request"]
++    )
++    #expect(actual == ["SHIMULATOR_START_XCTEST": "0", "KEPT": "launch", "ADDED": "request"])
++  }
++
++  @Test
++  func requestDyldVariableExtendsLaunchValue() {
++    let actual = ManagedTestRunner.mergedEnvironment(
++      launchEnvironment: [
++        "DYLD_INSERT_LIBRARIES": "/shim/libShimulator.dylib",
++        "DYLD_FALLBACK_LIBRARY_PATH": "/Xcode/Frameworks",
++      ],
++      requestEnvironment: [
++        "DYLD_INSERT_LIBRARIES": "/bundle/libclang_rt.asan_iossim_dynamic.dylib",
++        "DYLD_FALLBACK_LIBRARY_PATH": "/bundle/Frameworks",
++      ]
++    )
++    #expect(actual["DYLD_INSERT_LIBRARIES"] == "/shim/libShimulator.dylib:/bundle/libclang_rt.asan_iossim_dynamic.dylib")
++    #expect(actual["DYLD_FALLBACK_LIBRARY_PATH"] == "/Xcode/Frameworks:/bundle/Frameworks")
++  }
++
++  @Test
++  func requestDyldVariableIsUsedAsIsWhenLaunchValueIsAbsentOrEmpty() {
++    let actual = ManagedTestRunner.mergedEnvironment(
++      launchEnvironment: ["DYLD_FALLBACK_FRAMEWORK_PATH": ""],
++      requestEnvironment: ["DYLD_FALLBACK_FRAMEWORK_PATH": "/bundle/Frameworks", "DYLD_PRINT_LIBRARIES": "1"]
++    )
++    #expect(actual["DYLD_FALLBACK_FRAMEWORK_PATH"] == "/bundle/Frameworks")
++    #expect(actual["DYLD_PRINT_LIBRARIES"] == "1")
++  }
++
++  @Test
++  func emptyRequestDyldVariableClearsLaunchValue() {
++    let actual = ManagedTestRunner.mergedEnvironment(
++      launchEnvironment: ["DYLD_INSERT_LIBRARIES": "/shim/libShimulator.dylib"],
++      requestEnvironment: ["DYLD_INSERT_LIBRARIES": ""]
++    )
++    #expect(actual["DYLD_INSERT_LIBRARIES"] == "")
++  }
++}
+diff --git a/FBXCTestCoreTests/Tests/Unit/Support/TestConfigurationTestHelper.swift b/FBXCTestCoreTests/Tests/Unit/Support/TestConfigurationTestHelper.swift
+index 309cb02..59c199d 100644
+--- a/FBXCTestCoreTests/Tests/Unit/Support/TestConfigurationTestHelper.swift
++++ b/FBXCTestCoreTests/Tests/Unit/Support/TestConfigurationTestHelper.swift
+@@ -25,7 +25,8 @@ final class TestConfigurationTestHelper {
+     targetApplicationBundleID: String?,
+     testApplicationDependencies: [String: String]?,
+     automationFrameworkPath: String?,
+-    reportActivities: Bool
++    reportActivities: Bool,
++    randomizeExecutionOrder: Bool = false
+   ) throws -> TestConfiguration {
+     return try TestConfiguration(
+       byWritingToFileWithSessionIdentifier: sessionIdentifier,
+@@ -38,7 +39,8 @@ final class TestConfigurationTestHelper {
+       targetApplicationBundleID: targetApplicationBundleID,
+       testApplicationDependencies: testApplicationDependencies,
+       automationFrameworkPath: automationFrameworkPath,
+-      reportActivities: reportActivities
++      reportActivities: reportActivities,
++      randomizeExecutionOrder: randomizeExecutionOrder
+     )
+   }
+ 
+@@ -70,6 +72,10 @@ final class TestConfigurationTestHelper {
+     return (xcTestConfig as? NSObject)?.value(forKey: "reportActivities") as? Bool ?? false
+   }
+ 
++  static func testExecutionOrdering(_ xcTestConfig: Any) -> Int? {
++    return (xcTestConfig as? NSObject)?.value(forKey: "testExecutionOrdering") as? Int
++  }
++
+   static func reportResults(toIDE xcTestConfig: Any) -> Bool {
+     return (xcTestConfig as? NSObject)?.value(forKey: "reportResultsToIDE") as? Bool ?? false
+   }
+diff --git a/FBXCTestCoreTests/Tests/Unit/TestManager/TestBundleConnectionTimeoutsTests.swift b/FBXCTestCoreTests/Tests/Unit/TestManager/TestBundleConnectionTimeoutsTests.swift
+new file mode 100644
+index 0000000..0bad430
+--- /dev/null
++++ b/FBXCTestCoreTests/Tests/Unit/TestManager/TestBundleConnectionTimeoutsTests.swift
+@@ -0,0 +1,31 @@
++/*
++ * Copyright (c) Meta Platforms, Inc. and affiliates.
++ *
++ * This source code is licensed under the MIT license found in the
++ * LICENSE file in the root directory of this source tree.
++ */
++
++@testable import FBXCTestCore
++import Testing
++
++@Suite
++struct TestBundleConnectionTimeoutsTests {
++
++  private let variable = TestBundleConnectionTimeouts.bundleReadyVariable
++
++  @Test
++  func unsetVariableUsesTheDefault() {
++    #expect(TestBundleConnectionTimeouts.timeout(variable, environment: [:]) == 60)
++  }
++
++  @Test
++  func variableSetsTheTimeoutInSeconds() {
++    #expect(TestBundleConnectionTimeouts.timeout(variable, environment: [variable: "15"]) == 15)
++    #expect(TestBundleConnectionTimeouts.timeout(variable, environment: [variable: "2.5"]) == 2.5)
++  }
++
++  @Test(arguments: ["", "0", "-5", "soon", "inf", "nan"])
++  func unusableValueUsesTheDefault(value: String) {
++    #expect(TestBundleConnectionTimeouts.timeout(variable, environment: [variable: value]) == 60)
++  }
++}
+diff --git a/idb/cli/commands/xctest.py b/idb/cli/commands/xctest.py
+index 0c79785..90f91de 100644
+--- a/idb/cli/commands/xctest.py
++++ b/idb/cli/commands/xctest.py
+@@ -207,6 +207,11 @@ class CommonRunXcTestCommand(ClientCommand):
+             action="store_true",
+             help="Suspend test run process to wait for a debugger to be attached. (It is NOT supported by ui test).",
+         )
++        parser.add_argument(
++            "--randomize-execution-order",
++            action="store_true",
++            help="Run the tests in a random order instead of the default lexical one. (It is NOT supported by logic tests).",
++        )
+         parser.add_argument(
+             "--install",
+             help="When this option is provided bundle_ids are assumed "
+@@ -265,6 +270,12 @@ class CommonRunXcTestCommand(ClientCommand):
+             print(
+                 "--wait_for_debugger flag is NOT supported for ui tests. It will default to False"
+             )
++        randomize_execution_order = args.randomize_execution_order
++        if randomize_execution_order and is_logic:
++            print(
++                "--randomize-execution-order flag is NOT supported for logic tests. It will default to False"
++            )
++            randomize_execution_order = False
+ 
+         formatter = json_format_test_info if args.json else human_format_test_info
+         coverage_format = CodeCoverageFormat[args.coverage_format]
+@@ -290,6 +301,7 @@ class CommonRunXcTestCommand(ClientCommand):
+             coverage_format=coverage_format,
+             log_directory_path=args.log_directory_path,
+             wait_for_debugger=args.wait_for_debugger,
++            randomize_execution_order=randomize_execution_order,
+         ):
+             print(formatter(test_result))
+ 
+diff --git a/idb/cli/tests/interactive_contract_tests.py b/idb/cli/tests/interactive_contract_tests.py
+index 4c5a58c..c9435d7 100644
+--- a/idb/cli/tests/interactive_contract_tests.py
++++ b/idb/cli/tests/interactive_contract_tests.py
+@@ -112,6 +112,7 @@ class InteractiveContractTests(TestCase):
+             "coverage_format": CodeCoverageFormat.EXPORTED,
+             "log_directory_path": None,
+             "wait_for_debugger": False,
++            "randomize_execution_order": False,
+         }
+         call.update(overrides)
+         return call
+@@ -257,6 +258,62 @@ class InteractiveContractTests(TestCase):
+                 self.assertEqual(output, "")
+                 self.assertEqual(client.calls[:-1], setup_calls)
+ 
++    async def test_xctest_run_randomize_execution_order(self) -> None:
++        cases = [
++            (
++                "app",
++                [
++                    "xctest",
++                    "run",
++                    "app",
++                    "--randomize-execution-order",
++                    "Tests",
++                    "App",
++                ],
++                self._default_xctest_call(
++                    app_bundle_id="App",
++                    randomize_execution_order=True,
++                ),
++                "",
++            ),
++            (
++                "ui",
++                [
++                    "xctest",
++                    "run",
++                    "ui",
++                    "--randomize-execution-order",
++                    "Tests",
++                    "App",
++                    "Host",
++                ],
++                self._default_xctest_call(
++                    app_bundle_id="App",
++                    test_host_app_bundle_id="Host",
++                    is_ui_test=True,
++                    randomize_execution_order=True,
++                ),
++                "",
++            ),
++            (
++                "logic",
++                [
++                    "xctest",
++                    "run",
++                    "logic",
++                    "--randomize-execution-order",
++                    "Tests",
++                ],
++                self._default_xctest_call(is_logic_test=True),
++                "--randomize-execution-order flag is NOT supported for logic tests. It will default to False\n",
++            ),
++        ]
++        for name, argv, expected, expected_output in cases:
++            with self.subTest(name=name):
++                actual, output = await self._run_xctest(argv, _RecordingClient())
++                self.assertEqual(actual, expected)
++                self.assertEqual(output, expected_output)
++
+     async def test_xctest_run_ui_plan(self) -> None:
+         cases = [
+             (
+diff --git a/idb/cli/tests/parser_tests.py b/idb/cli/tests/parser_tests.py
+index f1bfa4b..0cb1213 100644
+--- a/idb/cli/tests/parser_tests.py
++++ b/idb/cli/tests/parser_tests.py
+@@ -954,6 +954,7 @@ class TestParser(TestCase):
+         namespace.coverage_format = "EXPORTED"
+         namespace.log_directory_path = None
+         namespace.wait_for_debugger = False
++        namespace.randomize_execution_order = False
+         namespace.install = False
+         namespace.companion_tls = False
+         namespace.install_dsym_test_bundle = None
+diff --git a/idb/common/types.py b/idb/common/types.py
+index 5774b50..e92e119 100644
+--- a/idb/common/types.py
++++ b/idb/common/types.py
+@@ -1096,6 +1096,7 @@ class Client(ABC):
+         coverage_format: CodeCoverageFormat = CodeCoverageFormat.EXPORTED,
+         log_directory_path: str | None = None,
+         wait_for_debugger: bool = False,
++        randomize_execution_order: bool = False,
+     ) -> AsyncIterator[TestRunInfo]:
+         # pyrefly: ignore [invalid-yield]
+         yield
+diff --git a/idb/grpc/client.py b/idb/grpc/client.py
+index e8bc023..eb45253 100644
+--- a/idb/grpc/client.py
++++ b/idb/grpc/client.py
+@@ -1768,6 +1768,7 @@ class Client(ClientBase):
+         coverage_format: CodeCoverageFormat = CodeCoverageFormat.EXPORTED,
+         log_directory_path: str | None = None,
+         wait_for_debugger: bool = False,
++        randomize_execution_order: bool = False,
+     ) -> AsyncIterator[TestRunInfo]:
+         async with self.stub.xctest_run.open() as stream:
+             request = make_request(
+@@ -1794,6 +1795,7 @@ class Client(ClientBase):
+                 collect_logs=log_directory_path is not None,
+                 wait_for_debugger=wait_for_debugger,
+                 collect_result_bundle=result_bundle_path is not None,
++                randomize_execution_order=randomize_execution_order,
+             )
+             log_parser = XCTestLogParser()
+             await stream.send_message(request)
+diff --git a/idb/grpc/tests/xctest_tests.py b/idb/grpc/tests/xctest_tests.py
+index 157dba7..9c929fd 100644
+--- a/idb/grpc/tests/xctest_tests.py
++++ b/idb/grpc/tests/xctest_tests.py
+@@ -261,6 +261,7 @@ class XCTestsTestCase(IsolatedAsyncioTestCase):
+                 enable_continuous_coverage_collection=True,
+             ),
+             collect_result_bundle=True,
++            randomize_execution_order=True,
+         )
+         debugger_output = BytesIO()
+         idb_log_buffer = StringIO()
+@@ -290,6 +291,7 @@ class XCTestsTestCase(IsolatedAsyncioTestCase):
+                 coverage_format=CodeCoverageFormat.RAW,
+                 log_directory_path="/tmp/logs",
+                 wait_for_debugger=True,
++                randomize_execution_order=True,
+                 idb_log_buffer=idb_log_buffer,
+             )
+ 
+diff --git a/idb/grpc/xctest.py b/idb/grpc/xctest.py
+index 7f78547..bc41234 100644
+--- a/idb/grpc/xctest.py
++++ b/idb/grpc/xctest.py
+@@ -115,6 +115,7 @@ def make_request(
+     collect_logs: bool,
+     wait_for_debugger: bool,
+     collect_result_bundle: bool,
++    randomize_execution_order: bool = False,
+ ) -> XctestRunRequest:
+     if is_logic_test:
+         mode = Mode(logic=Logic())
+@@ -152,6 +153,7 @@ def make_request(
+         wait_for_debugger=wait_for_debugger,
+         code_coverage=coverage_object,
+         collect_result_bundle=collect_result_bundle,
++        randomize_execution_order=randomize_execution_order,
+     )
+ 
+ 
+diff --git a/proto/idb.proto b/proto/idb.proto
+index fd306a1..f2f83fa 100644
+--- a/proto/idb.proto
++++ b/proto/idb.proto
+@@ -1311,6 +1311,9 @@ message XctestRunRequest {
+   bool wait_for_debugger = 12;
+   CodeCoverage code_coverage = 13;
+   bool collect_result_bundle = 14;
++  // Run the tests in a random order instead of the default lexical one, like
++  // Xcode's "Randomize execution order". Applies to application and UI tests.
++  bool randomize_execution_order = 15;
+ }
+ 
+ message XctestRunResponse {

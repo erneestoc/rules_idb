@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       idb_commit:
-        description: "facebook/idb commit to build"
-        required: true
-        default: "3f1bb6eb3ae7041ba4902605c6a5a4d686ccc3f8"
+        description: "facebook/idb commit to build (empty = IDB_COMMIT in idb/extensions.bzl)"
+        required: false
+        default: ""
       release_tag:
         description: "Existing release tag to attach the artifact to (empty = artifact only)"
         required: false
@@ -32,27 +32,31 @@ jobs:
           xcodebuild -version
 
       - name: Install build tools
-        run: brew install xcodegen protobuf swift-protobuf
+        run: brew install xcodegen protobuf
 
       - name: Check out facebook/idb at pinned commit
+        env:
+          INPUT_COMMIT: ${{ inputs.idb_commit }}
         run: |
-          git clone https://github.com/facebook/idb.git idb-src
+          IDB_COMMIT="${INPUT_COMMIT:-$(sed -n 's/^IDB_COMMIT = "\(.*\)"$/\1/p' idb/extensions.bzl)}"
+          echo "Building facebook/idb $IDB_COMMIT"
+          # Just the pinned commit: idb's full history is several hundred MB.
+          git init -q idb-src
           cd idb-src
-          git checkout "${{ inputs.idb_commit }}"
+          git fetch -q --depth 1 https://github.com/facebook/idb.git "$IDB_COMMIT"
+          git checkout -q FETCH_HEAD
           git apply "$GITHUB_WORKSPACE/patches/idb-build-fixes.patch"
 
       - name: Build companion, shims, and simulator bridge
         run: |
           cd idb-src
-          # Only what the test runner needs: the Repl shims (idb's REPL
-          # feature, unused here) fail to build on newer toolchains.
+          # Only what the test runner needs, not upstream's whole
+          # `build all` distribution: the REPL, sim-video and the tvOS
+          # simulator bridge are unused here (and tvOS needs its own SDK).
           ./build.sh build Shimulator-iOS
           ./build.sh build Shimulator-macOS
-          ./build.sh build SimulatorFrameworkBridge
-          # First clean invocation reliably fails with "no such module
-          # IDBGRPCSwift" (upstream xcodegen project quirk); the framework
-          # exists afterwards and the retry succeeds.
-          ./build.sh build idb_companion || ./build.sh build idb_companion
+          ./build.sh build SimulatorFrameworkBridge-iOS
+          ./build.sh build idb_companion
 
       - name: Assemble distribution
         run: |
@@ -64,7 +68,7 @@ jobs:
           cp "$R/idb_companion" "$D/"
           for b in "$R"/*.bundle; do [ -e "$b" ] && ditto "$b" "$D/$(basename "$b")"; done
           cp "$S/libShimulator-iOS.dylib" "$R/libShimulator-macOS.dylib" \
-             "$S/SimulatorFrameworkBridge" "$D/Resources/"
+             "$S/SimulatorFrameworkBridge-iOS" "$D/Resources/"
           tar -czf "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz" -C "$D" .
           shasum -a 256 "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz" | tee "$GITHUB_WORKSPACE/idb-companion-dist.tar.gz.sha256"
 

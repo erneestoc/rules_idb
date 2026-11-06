@@ -30,7 +30,7 @@ use_repo(pip, "rules_idb_pip")
 
 # Prebuilt idb_companion, fetched from this repository's GitHub releases.
 idb = use_extension("//idb:extensions.bzl", "idb")
-use_repo(idb, "idb_companion_dist")
+use_repo(idb, "idb_client_src", "idb_companion_dist")
 
 # Uncomment to develop against a local rules_apple checkout:
 # local_path_override(

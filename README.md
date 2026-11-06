@@ -14,7 +14,7 @@ simulators and cleans the lock up in shell traps.
 `rules_idb` replaces only the *run* phase: bundling, code signing, and
 providers all still come from rules_apple. It is a drop-in `runner` for
 `ios_unit_test` and `ios_ui_test`, and it is fully self-contained: the idb
-client ships vendored (on a hermetic python toolchain) and the prebuilt
+client is built from source (on a hermetic python toolchain) and the prebuilt
 `idb_companion` is fetched from this repository's releases. **The only host
 requirement is Xcode.**
 
@@ -99,8 +99,9 @@ Or use the predefined `@rules_idb//idb:default_runner`. For coverage, add
 
 Just Xcode. Nothing to `brew install`, no python setup, no PATH plumbing:
 
-* the **idb python client** is vendored in this repository
-  (`third_party/idb_client`, pinned facebook/idb commit) and runs on a
+* the **idb python client** is built from the pinned facebook/idb release:
+  a module extension fetches its source (sha256-verified), applies
+  [patches/](patches/) and generates its gRPC modules, and it runs on a
   hermetic python 3.12 toolchain via rules_python;
 * the **`idb_companion` binary** (plus simulator shims) is prebuilt by this
   repository's [release pipeline](.github/workflows/build-idb-dist.yml)
@@ -109,11 +110,13 @@ Just Xcode. Nothing to `brew install`, no python setup, no PATH plumbing:
   idb commit, patch, and Xcode version it was built and verified with (see
   [RELEASING.md](RELEASING.md)).
 
-Why not upstream binaries? The 2022-era releases are unusable on modern
-machines (the bottled companion misdetects Apple Silicon simulators as
-x86_64; the PyPI client crashes a current companion's install RPC), and
-Meta's open-source build of `main` needed the fixes carried in
-[patches/](patches/). [docs/BUILDING_IDB.md](docs/BUILDING_IDB.md)
+Why not upstream binaries? Upstream publishes a companion and client with
+each release again (since v1.6), and rules_idb builds from one (v1.7.8), but
+the runner depends on fixes in [patches/](patches/) that are proposed
+upstream and not yet released: random test ordering, configurable connection
+timeouts, sanitizer `DYLD_*` passthrough, Swift test bundle library paths,
+and two hangs/false failures. Once a release includes them, rules_idb can use
+the official artifacts. [docs/BUILDING_IDB.md](docs/BUILDING_IDB.md)
 documents building the toolchain yourself; point
 `RULES_IDB_IDB_PATH`/`RULES_IDB_COMPANION_PATH` at the result to override
 the bundled binaries.
@@ -209,7 +212,7 @@ Both are now bounded by default, so neither needs configuring:
   died, so shortening it cannot affect a passing run.
 * `RULES_IDB_BUNDLE_READY_SECS` (default 25s, upstream hardcodes 60s) bounds
   how long idb waits for the test bundle to connect. Upstream provides no way
-  to change this; the vendored patch adds one, following the precedent
+  to change this; the patch adds one, following the precedent
   `FBXCTEST_CRASH_WAIT_TIMEOUT` already sets in the same subsystem. A healthy
   launch reaches its first result in a couple of seconds; raise this if yours
   legitimately takes longer.

@@ -1,38 +1,40 @@
-# Vendored fb-idb python client (MIT licensed, see LICENSE).
+# The fb-idb python client (MIT licensed).
 #
-# Source: https://github.com/facebook/idb at the commit recorded in
-# //docs:BUILDING_IDB.md. The gRPC files (idb/grpc/idb_pb2.py,
-# idb/grpc/idb_grpc.py) are pre-generated from proto/idb.proto;
-# python/migrations is a shim for a Meta-internal module.
+# Built from source: idb/extensions.bzl fetches facebook/idb at the pinned
+# release, applies patches/idb-build-fixes.patch (the same patch the companion
+# is built with) and generates the gRPC modules with :gen_grpc. Nothing of
+# upstream's is checked in here; see docs/BUILDING_IDB.md.
 
 load("@rules_python//python:py_binary.bzl", "py_binary")
-load("@rules_python//python:py_library.bzl", "py_library")
-
-py_library(
-    name = "idb_client_lib",
-    visibility = ["//visibility:public"],
-    srcs = glob([
-        "idb/**/*.py",
-        "python/**/*.py",
-    ]),
-    imports = ["."],
-    deps = [
-        "@rules_idb_pip//aiofiles",
-        "@rules_idb_pip//grpclib",
-        "@rules_idb_pip//protobuf",
-        "@rules_idb_pip//pyre_extensions",
-        "@rules_idb_pip//treelib",
-    ],
-)
 
 py_binary(
     name = "idb_client",
     srcs = ["idb_cli.py"],
     main = "idb_cli.py",
     # Pin the interpreter regardless of the consumer's default python
-    # version: the vendored client needs >= 3.10 and the locked pip wheels
-    # are resolved for 3.12.
+    # version: the client needs >= 3.10 and the locked pip wheels are
+    # resolved for 3.12.
     python_version = "3.12",
     visibility = ["//visibility:public"],
-    deps = [":idb_client_lib"],
+    deps = ["@idb_client_src//:idb_client_lib"],
+)
+
+alias(
+    name = "idb_client_lib",
+    actual = "@idb_client_src//:idb_client_lib",
+    visibility = ["//visibility:public"],
+)
+
+# Generates idb_pb2.py and idb_grpc.py from proto/idb.proto inside the fetched
+# source repository (run by its genrule, so the modules land in the same `idb`
+# package as the sources).
+py_binary(
+    name = "gen_grpc",
+    srcs = ["gen_grpc.py"],
+    python_version = "3.12",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@rules_idb_pip//grpcio_tools",
+        "@rules_idb_pip//grpclib",
+    ],
 )

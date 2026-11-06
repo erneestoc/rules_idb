@@ -204,12 +204,13 @@
   "moduleExtensions": {
     "//idb:extensions.bzl%idb": {
       "general": {
-        "bzlTransitiveDigest": "zduNG9+2/DzgsoEhOV+4/J9GEnvexqFUH7qOPCc3XUE=",
+        "bzlTransitiveDigest": "UgWsQ7Bku1k3b5btRHZDhfOXbyWFJwGBomRb8Q7xQWs=",
         "usagesDigest": "+woMczbqVJYdpqds7sS+L9g80J9bxOBpPP+SAJvhRLg=",
         "recordedInputs": [
           "REPO_MAPPING:,bazel_tools bazel_tools",
           "ENV:RULES_IDB_COMPANION_DIST_URL \\0",
-          "ENV:RULES_IDB_COMPANION_DIST_SHA256 \\0"
+          "ENV:RULES_IDB_COMPANION_DIST_SHA256 \\0",
+          "REPO_MAPPING:,rules_idb_pip rules_python++pip+rules_idb_pip"
         ],
         "generatedRepoSpecs": {
           "idb_companion_dist": {
@@ -220,6 +221,23 @@
               ],
               "sha256": "1edd25393d4922ba08946b9f7dd3c84cd905004e0e775216713d8c9b75d3396a",
               "build_file_content": "\npackage(default_visibility = [\"//visibility:public\"])\n\nfilegroup(\n    name = \"dist\",\n    srcs = glob([\"**\"]),\n)\n\nexports_files([\"idb_companion\"])\n"
+            }
+          },
+          "idb_client_src": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/facebook/idb/archive/c793afad2a31092628f7013cf1aa96f266c85024.tar.gz"
+              ],
+              "sha256": "c440cd8b4fa2b0adaf675990e5a7ec7b5d43b4a3fb574fd86d419c57aa295f41",
+              "strip_prefix": "idb-c793afad2a31092628f7013cf1aa96f266c85024",
+              "patches": [
+                "@@//patches:idb-build-fixes.patch"
+              ],
+              "patch_args": [
+                "-p1"
+              ],
+              "build_file_content": "\nload(\"@rules_python//python:py_library.bzl\", \"py_library\")\n\ngenrule(\n    name = \"grpc_modules\",\n    srcs = [\"proto/idb.proto\"],\n    outs = [\n        \"idb/grpc/idb_pb2.py\",\n        \"idb/grpc/idb_grpc.py\",\n    ],\n    cmd = \"$(execpath @@//third_party/idb_client:gen_grpc) $(location proto/idb.proto) $(RULEDIR)/idb/grpc\",\n    tools = [\"@@//third_party/idb_client:gen_grpc\"],\n)\n\npy_library(\n    name = \"idb_client_lib\",\n    srcs = glob(\n        [\"idb/**/*.py\"],\n        exclude = [\n            \"idb/**/tests/**\",\n            \"idb/**/*_tests.py\",\n        ],\n    ) + [\":grpc_modules\"],\n    imports = [\".\"],\n    visibility = [\"//visibility:public\"],\n    deps = [\n        \"@@rules_python++pip+rules_idb_pip//aiofiles:aiofiles\",\n        \"@@rules_python++pip+rules_idb_pip//grpclib:grpclib\",\n        \"@@rules_python++pip+rules_idb_pip//protobuf:protobuf\",\n    ],\n)\n"
             }
           }
         }
