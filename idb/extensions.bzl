@@ -24,8 +24,8 @@ IDB_COMMIT = "c793afad2a31092628f7013cf1aa96f266c85024"
 # never change; if a fetch fails on a checksum mismatch, recompute it.
 IDB_SOURCE_SHA256 = "c440cd8b4fa2b0adaf675990e5a7ec7b5d43b4a3fb574fd86d419c57aa295f41"
 
-COMPANION_RELEASE = "v0.3.0"
-COMPANION_SHA256 = "1edd25393d4922ba08946b9f7dd3c84cd905004e0e775216713d8c9b75d3396a"
+COMPANION_RELEASE = "v0.4.0"
+COMPANION_SHA256 = "acc3e36f2338c4e22f4059d2f05cfb521d825aebc639473669fb4bb972a8575c"
 
 _COMPANION_BUILD = """
 package(default_visibility = ["//visibility:public"])
