@@ -1286,7 +1286,7 @@ cat > "$stream_monitor" <<'PYEOF'
 """Copy stdin to stdout, recording when idb reaches notable phases.
 
 argv: <markers.json> <stall_seconds|0> <idb_pid_file> [crash_grace_seconds|0]
-      [companion_log] [startup_grace_seconds|0]
+      [companion_log] [startup_grace_seconds|0] [companion_log_offset]
 
 Markers are seconds elapsed since this process started, which is close enough
 to the start of the idb command for phase accounting. A stall is "no output at
@@ -1314,8 +1314,9 @@ companion_log = sys.argv[5] if len(sys.argv) > 5 else ""
 # so the default grace sits comfortably above it.
 COMPANION_LAUNCH_MARKER = "Launching Application"
 # The client sends the run request once it has installed everything, so this
-# marks the end of the install phase.
-COMPANION_RUN_MARKER = "Start of xctest_run"
+# marks the end of the install phase. Every companion logs each RPC's arrival
+# this way (older ones also log "Start of xctest_run").
+COMPANION_RUN_MARKER = "xctest_run called with"
 COMPANION_CRASH_MARKERS = (
     "Crashed: Crash Info:",
     "Bundle disconnected, but test plan has not completed",
@@ -1324,13 +1325,11 @@ COMPANION_CRASH_MARKERS = (
 )
 startup_grace_s = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
 app_launched_at = None
-# Start from the log's current end: a retry reuses the log, and the previous
-# attempt's markers must not count for this one. The client has not reached the
-# companion yet at this point; it is starting up alongside this monitor.
-try:
-    companion_offset = os.path.getsize(companion_log) if companion_log else 0
-except OSError:
-    companion_offset = 0
+# Where this attempt's part of the log starts: a retry reuses the log, and the
+# previous attempt's markers must not count for this one. The runner measures
+# it before starting the client, which can reach the companion before this
+# monitor is up.
+companion_offset = int(sys.argv[7]) if len(sys.argv) > 7 else 0
 # Overlap carried between polls: a marker can straddle two reads, and searching
 # each chunk in isolation would then never match it.
 companion_tail = ""
@@ -1673,6 +1672,8 @@ run_idb_once() {
   idb_start_ms=$(now_ms)
   start_recording
   rm -f "$markers_file" "$idb_pid_file"
+  local companion_log_offset
+  companion_log_offset=$(stat -f %z "$companion_log" 2>/dev/null || echo 0)
   # idb runs as a named child so the monitor can signal it on a stall; the
   # monitor passes every line through untouched, so `tee`'s file (parsed
   # below) and the console output are unchanged. The client is python, which
@@ -1683,7 +1684,7 @@ run_idb_once() {
     | tee -i "$testlog" \
     | "$python_bin" "$stream_monitor" "$markers_file" "${RULES_IDB_STALL_SECS:-0}" \
         "$idb_pid_file" "$crash_grace_secs" "$companion_log" \
-        "${RULES_IDB_STARTUP_GRACE_SECS:-120}" \
+        "${RULES_IDB_STARTUP_GRACE_SECS:-120}" "$companion_log_offset" \
     || test_exit_code=$?
   stop_recording
   idb_ms=$(( $(now_ms) - idb_start_ms ))
