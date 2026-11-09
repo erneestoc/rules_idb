@@ -98,5 +98,22 @@ else
   echo "      patches/idb-build-fixes.patch and re-run; see docs/BUILDING_IDB.md."
 fi
 
+# 11. Test host reuse: an unchanged host is not reinstalled, any change to it
+# is, and the host a test runs in is always its own build's (every
+# tests/host_reuse test asserts that). Serialized, so every run lands on the
+# same simulator.
+reused() { grep -q 'already installed and unchanged' "$TL/tests/host_reuse/$1/test.log"; }
+hr() { bazel test --local_test_jobs=1 --nocache_test_results --test_output=summary "$@" >/dev/null 2>&1; }
+hr //tests/host_reuse:TestsA --test_env=RULES_IDB_REINSTALL_TEST_HOST=1
+check "host reuse: forced reinstall passes" "[[ $? -eq 0 ]] && ! reused TestsA"
+hr //tests/host_reuse:TestsB
+check "host reuse: another target reuses the unchanged host" "[[ $? -eq 0 ]] && reused TestsB"
+hr //tests/host_reuse:TestsA --define=host_reuse=v2
+check "host reuse: a changed resource reinstalls the host" "[[ $? -eq 0 ]] && ! reused TestsA"
+hr //tests/host_reuse:OtherTests
+check "host reuse: another host with the same bundle id is installed" "[[ $? -eq 0 ]] && ! reused OtherTests"
+hr //tests/host_reuse:TestsC
+check "host reuse: switching back reinstalls" "[[ $? -eq 0 ]] && ! reused TestsC"
+
 echo
 if [[ $fails -eq 0 ]]; then echo "ALL BEHAVIORAL CHECKS PASSED"; else echo "$fails CHECK(S) FAILED"; exit 1; fi

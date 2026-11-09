@@ -127,7 +127,7 @@ the bundled binaries.
 | --- | --- | --- |
 | `device_type` | newest iPhone | `xcrun simctl list devicetypes` name |
 | `os_version` | newest iOS | `xcrun simctl list runtimes` version |
-| `pool_size` | `0` (on demand) | max simulators per pool; concurrency already bounded by `--local_test_jobs`. Idle residue bounded by `RULES_IDB_WARM_POOL_SIZE` (default: half the CPU cores, floor 4, stay booted; each ≈ 60-100 processes). Keep it ≥ your `--local_test_jobs`: a lower cap makes sustained wide runs re-boot trimmed simulators every pass (measured: 2-4× slower and flaky) |
+| `pool_size` | `0` (on demand) | max simulators per pool; concurrency already bounded by `--local_test_jobs`. Idle residue bounded by `RULES_IDB_WARM_POOL_SIZE` (default: `pool_size` when set, otherwise half the CPU cores, floor 4, stay booted; each ≈ 60-100 processes). Set it to the number of tests a host runs at once: lower makes sustained wide runs re-boot trimmed simulators every pass (measured: 2-4× slower and flaky), higher keeps simulators booted that nothing uses |
 | `max_concurrent_boots` | `0` = auto (ncpu/2) | machine-wide cap on simultaneous simulator creates/boots |
 | `random` | `False` | run tests in random order (requires test host) |
 | `shutdown_simulator_after_test` | `False` | shut simulator down after each test |
@@ -142,7 +142,9 @@ Runtime environment overrides: `RULES_IDB_IDB_PATH`,
 `RULES_IDB_REPORT_ACTIVITIES`, `RULES_IDB_COLLECT_RESULT_BUNDLE`,
 `RULES_IDB_RECORD_VIDEO`, `RULES_IDB_CRASH_WAIT_SECS`,
 `RULES_IDB_CRASH_GRACE_SECS`, `RULES_IDB_STARTUP_GRACE_SECS`,
-`RULES_IDB_STALL_SECS`, `DEBUG_IDB_TEST_RUNNER`.
+`RULES_IDB_STALL_SECS`, `RULES_IDB_WARM_POOL_SIZE`,
+`RULES_IDB_REINSTALL_TEST_HOST`, `RULES_IDB_DISABLE_APSD`,
+`DEBUG_IDB_TEST_RUNNER`.
 
 ### Diagnosing a hung or disconnected test run
 
@@ -175,9 +177,21 @@ at the end of a completed run, and so produces nothing when a run is cut
 short), these are captured however the run ended, including the
 timeout/SIGTERM path.
 
-Each run also reports `timing last_test_event_at=… trailing=…`: the gap
-between the final test result and the end of the idb phase. A large trailing
-value is the signature of a post-disconnect wait rather than slow tests.
+Each run ends with a timing line:
+
+```
+note: timing stage=0.07s simulator=0.63s companion=0.35s idb=2.94s install=0.43s launch=0.55s tests=1.90s trailing=0.07s total=4.42s
+```
+
+`stage` copies the bundles into the action's temp dir, `simulator` finds (or
+creates and boots) the pool simulator and checks that it is ready, and
+`companion` starts `idb_companion`. `idb` is the whole client run, split into
+`install` (client start and bundle installs, until the companion receives the
+run request), `launch` (test configuration, app launch and test bundle
+connection, until the first result), `tests` (first to last result) and
+`trailing` (after the last result, or after a disconnect). A large
+`trailing` value is the signature of a post-disconnect wait rather than slow
+tests.
 
 ### Three ways a run can appear to hang, and what bounds each
 
@@ -380,6 +394,34 @@ CI disks. The runner prints a hint when it detects archive staging. Also
 see the boot-concurrency and `preboot` sections above; simulator installs
 are already copy-on-write, so bundle size otherwise barely affects the
 run phase.
+
+### Test host reuse
+
+Test targets usually share a test host, byte for byte. With directory
+bundles (above) and the bundled idb client, the runner installs a host once
+per simulator and reuses it while it is unchanged: it compares a digest of
+the build's host (file paths and contents) with one of the copy installed on
+the simulator, and installs only the test bundle when they match. For UI
+tests the XCTRunner app has to match too. Comparing against the installed
+copy, rather than remembering what was installed, means anything that
+changed it (another build with the same bundle id, an install from outside
+the runner, a test writing into its own bundle, an erased simulator) leads
+to a fresh install.
+
+Reusing an installed host changes nothing tests can observe: app data
+survives a reinstall anyway. `RULES_IDB_REINSTALL_TEST_HOST=1` installs on
+every run regardless.
+
+### macOS VMs: apsd
+
+Inside macOS virtual machines, a simulator's `apsd` retries device activation
+forever (MobileActivation -25, "CoreSimulatorService is not allowed to use
+this API"). That keeps `diagnosticd` busy in the simulator and on the host and
+fills `CoreSimulator.log` at about 60 lines a second; with four booted
+simulators it was reported to cost 4 of 12 vCPUs at idle.
+`--test_env=RULES_IDB_DISABLE_APSD=1` disables apsd in each simulator the
+runner uses, once (the device remembers it). Push notifications cannot be
+delivered to a simulator without apsd.
 
 ## Limitations
 

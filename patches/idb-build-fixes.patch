@@ -709,10 +709,10 @@ index 0000000..0bad430
 +  }
 +}
 diff --git a/idb/cli/commands/xctest.py b/idb/cli/commands/xctest.py
-index 0c79785..90f91de 100644
+index 0c79785..96a7cd6 100644
 --- a/idb/cli/commands/xctest.py
 +++ b/idb/cli/commands/xctest.py
-@@ -207,6 +207,11 @@ class CommonRunXcTestCommand(ClientCommand):
+@@ -207,12 +207,23 @@ class CommonRunXcTestCommand(ClientCommand):
              action="store_true",
              help="Suspend test run process to wait for a debugger to be attached. (It is NOT supported by ui test).",
          )
@@ -724,7 +724,19 @@ index 0c79785..90f91de 100644
          parser.add_argument(
              "--install",
              help="When this option is provided bundle_ids are assumed "
-@@ -265,6 +270,12 @@ class CommonRunXcTestCommand(ClientCommand):
+             "to be paths instead. They are installed before running.",
+             action="store_true",
+         )
++        parser.add_argument(
++            "--use-installed-apps",
++            help="With --install, install only the test bundle: the app "
++            "arguments stay bundle ids of apps already installed on the target.",
++            action="store_true",
++        )
+         parser.add_argument(
+             "--install-dsym-test-bundle",
+             default=None,
+@@ -265,6 +276,12 @@ class CommonRunXcTestCommand(ClientCommand):
              print(
                  "--wait_for_debugger flag is NOT supported for ui tests. It will default to False"
              )
@@ -737,7 +749,7 @@ index 0c79785..90f91de 100644
  
          formatter = json_format_test_info if args.json else human_format_test_info
          coverage_format = CodeCoverageFormat[args.coverage_format]
-@@ -290,6 +301,7 @@ class CommonRunXcTestCommand(ClientCommand):
+@@ -290,6 +307,7 @@ class CommonRunXcTestCommand(ClientCommand):
              coverage_format=coverage_format,
              log_directory_path=args.log_directory_path,
              wait_for_debugger=args.wait_for_debugger,
@@ -745,8 +757,26 @@ index 0c79785..90f91de 100644
          ):
              print(formatter(test_result))
  
+@@ -370,6 +388,8 @@ class XctestRunAppCommand(CommonRunXcTestCommand):
+ 
+     async def install_bundles(self, args: Namespace, client: Client) -> None:
+         await super().install_bundles(args, client)
++        if args.use_installed_apps:
++            return
+         async for app in client.install(
+             args.app_bundle_id, on_upload_progress=print_upload_progress
+         ):
+@@ -397,6 +417,8 @@ class XctestRunUICommand(XctestRunAppCommand):
+ 
+     async def install_bundles(self, args: Namespace, client: Client) -> None:
+         await super().install_bundles(args, client)
++        if args.use_installed_apps:
++            return
+         async for app in client.install(
+             args.test_host_app_bundle_id, on_upload_progress=print_upload_progress
+         ):
 diff --git a/idb/cli/tests/interactive_contract_tests.py b/idb/cli/tests/interactive_contract_tests.py
-index 4c5a58c..c9435d7 100644
+index 4c5a58c..490e1cb 100644
 --- a/idb/cli/tests/interactive_contract_tests.py
 +++ b/idb/cli/tests/interactive_contract_tests.py
 @@ -112,6 +112,7 @@ class InteractiveContractTests(TestCase):
@@ -757,7 +787,31 @@ index 4c5a58c..c9435d7 100644
          }
          call.update(overrides)
          return call
-@@ -257,6 +258,62 @@ class InteractiveContractTests(TestCase):
+@@ -248,6 +249,23 @@ class InteractiveContractTests(TestCase):
+                     ("install", "App.app"),
+                 ],
+             ),
++            (
++                "install_with_installed_app",
++                [
++                    "xctest",
++                    "run",
++                    "app",
++                    "--install",
++                    "--use-installed-apps",
++                    "Tests.xctest",
++                    "App",
++                ],
++                self._default_xctest_call(
++                    test_bundle_id="InstalledTests",
++                    app_bundle_id="App",
++                ),
++                [("install_xctest", ("Tests.xctest", None))],
++            ),
+         ]
+         for name, argv, expected, setup_calls in cases:
+             with self.subTest(name=name):
+@@ -257,6 +275,62 @@ class InteractiveContractTests(TestCase):
                  self.assertEqual(output, "")
                  self.assertEqual(client.calls[:-1], setup_calls)
  
@@ -820,18 +874,81 @@ index 4c5a58c..c9435d7 100644
      async def test_xctest_run_ui_plan(self) -> None:
          cases = [
              (
+@@ -314,6 +388,27 @@ class InteractiveContractTests(TestCase):
+                     ("install", "Host.app"),
+                 ],
+             ),
++            (
++                "install_with_installed_apps",
++                [
++                    "xctest",
++                    "run",
++                    "ui",
++                    "--install",
++                    "--use-installed-apps",
++                    "Tests.xctest",
++                    "App",
++                    "Host",
++                ],
++                self._default_xctest_call(
++                    test_bundle_id="InstalledTests",
++                    app_bundle_id="App",
++                    test_host_app_bundle_id="Host",
++                    is_ui_test=True,
++                ),
++                "",
++                [("install_xctest", ("Tests.xctest", None))],
++            ),
+         ]
+         for name, argv, expected, expected_output, setup_calls in cases:
+             with self.subTest(name=name):
 diff --git a/idb/cli/tests/parser_tests.py b/idb/cli/tests/parser_tests.py
-index f1bfa4b..0cb1213 100644
+index f1bfa4b..4a26cf9 100644
 --- a/idb/cli/tests/parser_tests.py
 +++ b/idb/cli/tests/parser_tests.py
-@@ -954,6 +954,7 @@ class TestParser(TestCase):
+@@ -954,7 +954,9 @@ class TestParser(TestCase):
          namespace.coverage_format = "EXPORTED"
          namespace.log_directory_path = None
          namespace.wait_for_debugger = False
 +        namespace.randomize_execution_order = False
          namespace.install = False
++        namespace.use_installed_apps = False
          namespace.companion_tls = False
          namespace.install_dsym_test_bundle = None
+         namespace.skip_signing_bundles = None
+@@ -1001,6 +1003,32 @@ class TestParser(TestCase):
+             namespace.timeout = None
+             mock.assert_called_once_with(namespace)
+ 
++    async def test_xctest_run_app_with_installed_app(self) -> None:
++        mock = AsyncMock()
++        mock.return_value = []
++        with patch(
++            "idb.cli.commands.xctest.XctestRunAppCommand.run", new=mock, create=True
++        ):
++            test_bundle_path = "/bundle/path"
++            app_under_test_id = "com.me.app"
++            await cli_main(
++                cmd_input=[
++                    "xctest",
++                    "run",
++                    "app",
++                    "--install",
++                    "--use-installed-apps",
++                    test_bundle_path,
++                    app_under_test_id,
++                ]
++            )
++            namespace = self.xctest_run_namespace("app", test_bundle_path)
++            namespace.app_bundle_id = app_under_test_id
++            namespace.install = True
++            namespace.use_installed_apps = True
++            namespace.timeout = None
++            mock.assert_called_once_with(namespace)
++
+     async def test_xctest_run_logic(self) -> None:
+         mock = AsyncMock()
+         mock.return_value = []
 diff --git a/idb/common/types.py b/idb/common/types.py
 index 5774b50..e92e119 100644
 --- a/idb/common/types.py
