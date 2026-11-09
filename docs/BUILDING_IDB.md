@@ -44,6 +44,10 @@ includes it.
   so app-hosted runs with `--tests-to-run`/`--tests-to-skip` segfaulted the
   companion. That breaks `shard_count` and `--test_filter`. The patch
   retains the placeholder before each initializer. facebook/idb#TBD-G
+* **`xctest run --install --use-installed-apps`** (`idb/cli/commands/xctest.py`,
+  python client only): installs just the test bundle and takes the app
+  arguments as bundle ids of apps already installed. The runner uses it to
+  reuse an unchanged test host. facebook/idb#TBD-H
 
 What the patch no longer carries, compared with the `3f1bb6e` pin: the
 toolchain workarounds (upstream code was rewritten), the single

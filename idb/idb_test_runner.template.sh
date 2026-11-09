@@ -80,12 +80,16 @@ pool_size="${RULES_IDB_POOL_SIZE:-%(pool_size)s}"
 # running action); what must be bounded separately is the idle residue:
 # each simulator left booted keeps ~60-100 CoreSimulator processes alive.
 # After a test, only the first N slots stay warm; higher slots shut their
-# simulator down. Auto default: half the CPU cores (floor 4), matching the
-# boot gate -- benchmarked: sustained 8-wide runs with a cap of 4 spend
-# 15-60s per action re-booting trimmed simulators (and flake under the
-# churn), while a cap matching the concurrency stays flat.
+# simulator down. It should match the number of tests run at once on this
+# host -- benchmarked: sustained 8-wide runs with a cap of 4 spend 15-60s per
+# action re-booting trimmed simulators (and flake under the churn), while a
+# cap matching the concurrency stays flat. A pool_size caps that concurrency,
+# so it is the default when set; otherwise half the CPU cores (floor 4),
+# matching the boot gate.
 warm_pool_size="${RULES_IDB_WARM_POOL_SIZE:-}"
-if [[ -z "$warm_pool_size" ]]; then
+if [[ -z "$warm_pool_size" && "$pool_size" -gt 0 ]]; then
+  warm_pool_size=$pool_size
+elif [[ -z "$warm_pool_size" ]]; then
   warm_pool_size=$(( $(/usr/sbin/sysctl -n hw.ncpu 2>/dev/null || echo 8) / 2 ))
   [[ "$warm_pool_size" -ge 4 ]] || warm_pool_size=4
 fi
@@ -114,21 +118,29 @@ runner_start_ms=$(now_ms)
 # indefinitely against a wedged device or a stuck CoreSimulatorService;
 # bounding them turns silent budget-eating hangs into fast, attributable
 # failures. Children must not inherit the pool/boot-gate lock fds.
+#
+# Returns as soon as the command does: a watchdog process does the killing,
+# rather than polling the command, which cost up to 0.5s per call on every
+# bounded simctl invocation. The watchdog's output goes to /dev/null so that it
+# never holds open a pipe the caller is reading to EOF.
 run_bounded() {
   local deadline_secs="$1"
   shift
   "$@" 200>&- 201>&- &
   local cmd_pid=$!
-  for (( _i = 0; _i < deadline_secs * 2; _i++ )); do
-    kill -0 "$cmd_pid" 2>/dev/null || break
-    sleep 0.5
-  done
-  if kill -0 "$cmd_pid" 2>/dev/null; then
-    kill -9 "$cmd_pid" 2>/dev/null || true
-    wait "$cmd_pid" 2>/dev/null || true
-    return 124
+  /usr/bin/perl -e 'sleep $ARGV[0]; kill "KILL", $ARGV[1]' \
+    "$deadline_secs" "$cmd_pid" </dev/null >/dev/null 2>&1 200>&- 201>&- &
+  local watchdog_pid=$!
+  local status=0
+  wait "$cmd_pid" 2>/dev/null || status=$?
+  if kill -0 "$watchdog_pid" 2>/dev/null; then
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$status"
   fi
-  wait "$cmd_pid"
+  # The watchdog has exited, so the deadline passed and it killed the command.
+  wait "$watchdog_pid" 2>/dev/null || true
+  return 124
 }
 
 # True once SpringBoard has a PID in the simulator's launchd -- the earliest
@@ -210,8 +222,10 @@ pre_action_binary="%(pre_action_binary)s"
 post_action_binary="%(post_action_binary)s"
 post_action_determines_exit_code="%(post_action_determines_exit_code)s"
 
+bundled_idb_client=false
 if [[ -z "$idb_bin" ]]; then
   idb_bin="$(runfile "%(idb_client_path)s")"
+  bundled_idb_client=true
 fi
 
 if ! command -v "$idb_bin" >/dev/null 2>&1; then
@@ -444,7 +458,53 @@ fi
 
 test_host_path="%(test_host_path)s"
 test_host_dir=""
-if [[ -n "$test_host_path" ]]; then
+test_host_bundle_id=""
+# A test host app is installed on the simulator once and reused while its
+# contents stay the same: many test targets share one host, byte for byte,
+# and reinstalling it each time is pure overhead. App data survives a
+# reinstall anyway, so reusing the installed copy changes nothing the tests
+# can see. Such a host is fingerprinted here and only staged later, if it
+# turns out to need installing. For UI tests the same goes for the XCTRunner
+# app, and both must match. Only the bundled client can run against installed
+# apps (--use-installed-apps, from patches/idb-build-fixes.patch).
+# RULES_IDB_REINSTALL_TEST_HOST=1 always reinstalls.
+test_host_digest=""
+reuse_test_host=false
+
+# Fingerprint of a bundle directory: relative paths (directories included,
+# which CoreSimulator keeps even when empty) and file contents, following
+# symlinks the way the staging copy (cp -RL) does. File modes, extended
+# attributes, timestamps and the bundle's own name are left out: CoreSimulator
+# installs a byte-identical copy that differs in exactly those (it drops, for
+# one, the executable bit rules_apple leaves on Info.plist).
+bundle_digest() {
+  [[ -d "$1" ]] || return 1
+  "$python_bin" - "$1" <<'PYEOF'
+import hashlib, os, sys
+
+root = sys.argv[1]
+digest = hashlib.sha256()
+for directory, dirs, files in os.walk(root, followlinks=True):
+    dirs.sort()
+    digest.update(b"%s/\0" % os.path.relpath(directory, root).encode())
+    for name in sorted(files):
+        path = os.path.join(directory, name)
+        with open(path, "rb") as f:
+            size = os.fstat(f.fileno()).st_size
+            digest.update(b"%s\0%d\0" % (os.path.relpath(path, root).encode(), size))
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+print(digest.hexdigest())
+PYEOF
+}
+
+if [[ -n "$test_host_path" && "$test_host_path" == *.app && "$bundled_idb_client" == true \
+      && -z "${RULES_IDB_REINSTALL_TEST_HOST:-}" ]]; then
+  test_host_bundle_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$test_host_path/Info.plist")
+  test_host_digest=$(bundle_digest "$test_host_path" || true)
+fi
+
+stage_test_host() {
   test_host_name=$(basename_without_extension "$test_host_path")
 
   if [[ "$test_host_path" == *.app ]]; then
@@ -456,13 +516,14 @@ if [[ -n "$test_host_path" ]]; then
     mv "$test_tmp_dir"/Payload/*.app "$test_tmp_dir"
     test_host_dir=$(find "$test_tmp_dir" -name "*.app" -type d -maxdepth 1 -mindepth 1 -print -quit)
   fi
+  test_host_bundle_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$test_host_dir/Info.plist")
+}
+
+if [[ -n "$test_host_path" && -z "$test_host_digest" ]]; then
+  stage_test_host
 fi
 
 test_bundle_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$test_bundle_dir/Info.plist")
-test_host_bundle_id=""
-if [[ -n "$test_host_dir" ]]; then
-  test_host_bundle_id=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$test_host_dir/Info.plist")
-fi
 
 # ---------------------------------------------------------------------------
 # UI tests: assemble an XCTRunner.app host from Xcode's agent template. For
@@ -856,6 +917,28 @@ PYEOF
   printf '%s %s\n' "$$" "$simulator_id" > "$session_marker" 2>/dev/null || true
 fi
 
+# Inside macOS VMs the simulator's apsd retries device activation forever
+# (MobileActivation -25, "CoreSimulatorService is not allowed to use this
+# API"), keeping diagnosticd busy in the simulator and on the host and filling
+# CoreSimulator.log; with a few booted simulators that costs several cores at
+# idle. RULES_IDB_DISABLE_APSD=1 turns apsd off, which the device remembers,
+# so it is done once per simulator. Push notifications cannot be delivered to
+# a simulator without apsd.
+if [[ -n "${RULES_IDB_DISABLE_APSD:-}" ]]; then
+  apsd_marker="$(dscl . -read "/Users/$(id -un)" NFSHomeDirectory 2>/dev/null | sed 's/^NFSHomeDirectory: //')"
+  apsd_marker="${apsd_marker:-$HOME}/Library/Developer/CoreSimulator/Devices/$simulator_id/data/rules_idb/apsd-disabled"
+  if [[ ! -f "$apsd_marker" ]]; then
+    if run_bounded 30 xcrun simctl spawn "$simulator_id" launchctl disable user/foreground/com.apple.apsd >&2; then
+      # Stop the running instance too; it is not running if this fails.
+      run_bounded 30 xcrun simctl spawn "$simulator_id" launchctl bootout user/foreground/com.apple.apsd >/dev/null 2>&1 || true
+      mkdir -p "$(dirname "$apsd_marker")" 2>/dev/null && touch "$apsd_marker" 2>/dev/null || true
+      echo "note: disabled apsd on simulator $simulator_id (RULES_IDB_DISABLE_APSD)" >&2
+    else
+      echo "warning: could not disable apsd on simulator $simulator_id" >&2
+    fi
+  fi
+fi
+
 simulator_ms=$(( $(now_ms) - stage_start_ms - stage_ms ))
 
 # Run a pre-action binary, if provided. The pool/boot-gate lock fds are
@@ -883,6 +966,32 @@ for stale_bundle in "$idb_bundle_root"/*/*.xctest; do
     rm -rf "$(dirname "$stale_bundle")"
   fi
 done
+
+# Whether the app with the given bundle id is installed with this digest.
+installed_app_matches() {
+  local bundle_id="$1" digest="$2" installed_dir
+  installed_dir=$(run_bounded 30 xcrun simctl get_app_container "$simulator_id" "$bundle_id" app 2>/dev/null) \
+    || return 1
+  [[ -n "$installed_dir" && "$(bundle_digest "$installed_dir" || true)" == "$digest" ]]
+}
+
+# Reuse the test host already installed on this simulator when it is
+# byte-identical to this build's (see test_host_digest). Comparing against the
+# installed copy itself, rather than remembering what was installed, also
+# catches an install by anything else, one that failed halfway, and a test
+# that wrote into its own app bundle.
+if [[ -n "$test_host_digest" ]]; then
+  if installed_app_matches "$test_host_bundle_id" "$test_host_digest" \
+      && { [[ "$is_ui_test" != true ]] \
+           || installed_app_matches "$runner_bundle_id" "$(bundle_digest "$runner_app_dir" || true)"; }; then
+    reuse_test_host=true
+    echo "note: test host $test_host_bundle_id${runner_app_dir:+ and $runner_bundle_id} already installed and unchanged; not reinstalling" >&2
+  else
+    host_stage_start_ms=$(now_ms)
+    stage_test_host
+    stage_ms=$(( stage_ms + $(now_ms) - host_stage_start_ms ))
+  fi
+fi
 
 # The socket must live at a short path: unix domain socket paths are limited
 # to ~104 bytes on macOS and Bazel's TEST_TMPDIR is far longer than that.
@@ -1204,6 +1313,9 @@ companion_log = sys.argv[5] if len(sys.argv) > 5 else ""
 # a slow test, because no test has run yet. idb's own bundleReadyTimeout is 60s,
 # so the default grace sits comfortably above it.
 COMPANION_LAUNCH_MARKER = "Launching Application"
+# The client sends the run request once it has installed everything, so this
+# marks the end of the install phase.
+COMPANION_RUN_MARKER = "Start of xctest_run"
 COMPANION_CRASH_MARKERS = (
     "Crashed: Crash Info:",
     "Bundle disconnected, but test plan has not completed",
@@ -1212,7 +1324,13 @@ COMPANION_CRASH_MARKERS = (
 )
 startup_grace_s = float(sys.argv[6]) if len(sys.argv) > 6 else 0.0
 app_launched_at = None
-companion_offset = 0
+# Start from the log's current end: a retry reuses the log, and the previous
+# attempt's markers must not count for this one. The client has not reached the
+# companion yet at this point; it is starting up alongside this monitor.
+try:
+    companion_offset = os.path.getsize(companion_log) if companion_log else 0
+except OSError:
+    companion_offset = 0
 # Overlap carried between polls: a marker can straddle two reads, and searching
 # each chunk in isolation would then never match it.
 companion_tail = ""
@@ -1264,6 +1382,7 @@ def note(line):
     if stripped.startswith("{"):
         try:
             record = json.loads(stripped)
+            marks.setdefault("first_test_event", round(time.monotonic() - start, 3))
             marks["last_test_event"] = round(time.monotonic() - start, 3)
             if record.get("crashed") and crash_seen_at is None:
                 crash_seen_at = time.monotonic()
@@ -1295,6 +1414,9 @@ def poll_companion_log():
     text = companion_tail + chunk.decode("utf-8", "replace")
     # Keep enough of the tail that a marker split across two polls still matches.
     companion_tail = text[-256:]
+    if "run_requested" not in marks and COMPANION_RUN_MARKER in text:
+        marks["run_requested"] = round(time.monotonic() - start, 3)
+        flush_marks()
     if app_launched_at is None and COMPANION_LAUNCH_MARKER in text:
         app_launched_at = time.monotonic()
         marks["app_launched"] = round(app_launched_at - start, 3)
@@ -1319,10 +1441,14 @@ while True:
         deadlines.append(crash_grace_s - (now - crash_seen_at))
     if kill_deadline is not None:
         deadlines.append(kill_deadline - now)
-    if companion_log and (crash_seen_at is None or app_launched_at is None):
+    if companion_log and app_launched_at is None:
+        # Until launch, poll often: the install and launch markers time the
+        # start of the run, and nothing else is happening then.
+        deadlines.append(0.1)
+    elif companion_log and crash_seen_at is None:
         # Poll cadence, so an empty client stream still gets noticed.
         deadlines.append(1.0)
-    timeout = None if not deadlines else max(0.25, min(deadlines))
+    timeout = None if not deadlines else max(0.1 if app_launched_at is None else 0.25, min(deadlines))
     ready, _, _ = select.select([fd], [], [], timeout)
     if not ready:
         poll_companion_log()
@@ -1419,6 +1545,8 @@ while True:
     # complete JSON, and re-examining the same bytes is harmless.
     if buffer:
         note(buffer.decode("utf-8", "replace"))
+    if app_launched_at is None:
+        poll_companion_log()
     flush_marks()
 
 if buffer:
@@ -1441,7 +1569,7 @@ idb_cmd=("$idb_bin" "--companion" "$companion_sock")
 idb_cmd+=("xctest" "run")
 if [[ "$is_ui_test" == true ]]; then
   idb_cmd+=("ui")
-elif [[ -n "$test_host_dir" ]]; then
+elif [[ -n "$test_host_path" ]]; then
   idb_cmd+=("app")
 else
   idb_cmd+=("logic")
@@ -1493,18 +1621,30 @@ if [[ "${COVERAGE:-}" -eq 1 && "${APPLE_COVERAGE:-}" -eq 1 ]]; then
 fi
 
 # Positionals last: bundle paths (via --install), then any extra arguments
-# for the test process, which are intentionally captured by REMAINDER.
-idb_cmd+=("--install" "$test_bundle_dir")
-if [[ "$is_ui_test" == true ]]; then
-  # For UI tests: app under test, then the XCTRunner host app.
-  idb_cmd+=("$test_host_dir" "$runner_app_dir")
-elif [[ -n "$test_host_dir" ]]; then
-  idb_cmd+=("$test_host_dir")
-fi
-
-if [[ ${#command_line_args[@]} -gt 0 ]]; then
-  idb_cmd+=("${command_line_args[@]}")
-fi
+# for the test process, which are intentionally captured by REMAINDER. Reused
+# apps are already installed, so they are named by bundle id.
+idb_options=("${idb_cmd[@]}")
+build_idb_cmd() {
+  idb_cmd=("${idb_options[@]}" "--install")
+  if [[ "$reuse_test_host" == true ]]; then
+    idb_cmd+=("--use-installed-apps" "$test_bundle_dir" "$test_host_bundle_id")
+    if [[ "$is_ui_test" == true ]]; then
+      idb_cmd+=("$runner_bundle_id")
+    fi
+  else
+    idb_cmd+=("$test_bundle_dir")
+    if [[ "$is_ui_test" == true ]]; then
+      # For UI tests: app under test, then the XCTRunner host app.
+      idb_cmd+=("$test_host_dir" "$runner_app_dir")
+    elif [[ -n "$test_host_dir" ]]; then
+      idb_cmd+=("$test_host_dir")
+    fi
+  fi
+  if [[ ${#command_line_args[@]} -gt 0 ]]; then
+    idb_cmd+=("${command_line_args[@]}")
+  fi
+}
+build_idb_cmd
 
 # Run idb and interpret its structured (json-lines) output: compute the
 # verdict, print a summary, and emit a JUnit XML report for Bazel.
@@ -1535,8 +1675,11 @@ run_idb_once() {
   rm -f "$markers_file" "$idb_pid_file"
   # idb runs as a named child so the monitor can signal it on a stall; the
   # monitor passes every line through untouched, so `tee`'s file (parsed
-  # below) and the console output are unchanged.
-  { "${idb_cmd[@]}" 2>&1 200>&- & idb_child=$!; echo "$idb_child" > "$idb_pid_file"; wait "$idb_child"; } \
+  # below) and the console output are unchanged. The client is python, which
+  # buffers a piped stdout: unbuffered, each result reaches the monitor when
+  # idb reports it, not in one burst at exit, which stall detection and the
+  # timing split both depend on.
+  { PYTHONUNBUFFERED=1 "${idb_cmd[@]}" 2>&1 200>&- & idb_child=$!; echo "$idb_child" > "$idb_pid_file"; wait "$idb_child"; } \
     | tee -i "$testlog" \
     | "$python_bin" "$stream_monitor" "$markers_file" "${RULES_IDB_STALL_SECS:-0}" \
         "$idb_pid_file" "$crash_grace_secs" "$companion_log" \
@@ -1549,36 +1692,56 @@ run_idb_once() {
   # Surface the post-disconnect period explicitly: a test-process disconnect
   # sends idb into a crash-log wait (default 120s) during which the event
   # stream is completely silent, which otherwise just looks like a hang.
+  #
+  # Also split the idb phase for the timing summary: install (client start and
+  # bundle installs, until the companion gets the run request), launch (test
+  # configuration, app launch and bundle connection, until the first result),
+  # tests (first to last result) and trailing (after the last result, or
+  # after a disconnect). They add up to the idb phase.
+  idb_breakdown=""
   if [[ -f "$markers_file" ]]; then
-    "$python_bin" - "$markers_file" "$idb_ms" <<'PYEOF' >&2 || true
+    idb_breakdown=$("$python_bin" - "$markers_file" "$idb_ms" <<'PYEOF' || true
 import json, sys
 try:
     marks = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
 idb_s = int(sys.argv[2]) / 1000.0
-disc = marks.get("disconnect")
-last = marks.get("last_test_event")
-at, label = (disc, "disconnect_at") if disc is not None else (last, "last_test_event_at")
-if at is None:
+at = marks.get
+
+requested, first, last, disc = (
+    at("run_requested"), at("first_test_event"), at("last_test_event"), at("disconnect"))
+end = disc if disc is not None else last
+parts = []
+def part(name, start, stop):
+    if start is not None and stop is not None:
+        parts.append("%s=%.3fs" % (name, max(0.0, stop - start)))
+    else:
+        parts.append("%s=?" % name)
+part("install", 0.0, requested)
+part("launch", requested, first)
+part("tests", first, last)
+part("trailing", end, idb_s)
+print(" ".join(parts))
+if end is None:
     sys.exit(0)
-trailing = idb_s - at
-print("note: timing %s=%.3fs trailing=%.3fs (idb total %.3fs)"
-      % (label, at, trailing, idb_s))
+trailing = idb_s - end
 # Only editorialise when the trailing gap is large enough to matter; a couple
 # of seconds is ordinary teardown.
 if trailing >= 20:
-    print("note: idb spent %.0fs after the last test result." % trailing)
+    err = sys.stderr
+    print("note: idb spent %.0fs after the last test result." % trailing, file=err)
     if disc is not None:
-        print("      The test process disconnected. idb then waits up to")
+        print("      The test process disconnected. idb then waits up to", file=err)
     else:
-        print("      No further test results arrived. If the test process disconnected,")
-        print("      idb waits up to")
-    print("      FBXCTEST_CRASH_WAIT_TIMEOUT (default 120s) for a crash report matching")
-    print("      the test host pid; that wait cannot succeed if crash reports are")
-    print("      unreadable here or the host was jetsam-killed. Bound it with")
-    print("      RULES_IDB_CRASH_WAIT_SECS; see $TEST_UNDECLARED_OUTPUTS_DIR/idb_diagnostics.")
+        print("      No further test results arrived. If the test process disconnected,", file=err)
+        print("      idb waits up to", file=err)
+    print("      FBXCTEST_CRASH_WAIT_TIMEOUT (default 120s) for a crash report matching", file=err)
+    print("      the test host pid; that wait cannot succeed if crash reports are", file=err)
+    print("      unreadable here or the host was jetsam-killed. Bound it with", file=err)
+    print("      RULES_IDB_CRASH_WAIT_SECS; see $TEST_UNDECLARED_OUTPUTS_DIR/idb_diagnostics.", file=err)
 PYEOF
+)
   fi
 
   parse_exit_code=0
@@ -1723,13 +1886,18 @@ if [[ "$idb_exit_code" -ne 0 && "$parse_exit_code" -eq 71 && -n "${acquired_slot
   wait_for_springboard "$simulator_id" || true
   sleep 2
   spawn_companion
+  # Do not trust a reused test host to be the problem-free part: install it.
+  if [[ "$reuse_test_host" == true ]]; then
+    reuse_test_host=false
+    stage_test_host
+    build_idb_cmd
+  fi
   run_idb_once
 fi
 
-# Phase timing summary. "idb" covers bundle install plus test execution;
-# subtract the in-simulator test time reported above to estimate install
-# and session-setup overhead.
-echo "note: timing stage=$(fmt_ms "$stage_ms") simulator=$(fmt_ms "$simulator_ms") companion=$(fmt_ms "$companion_ms") idb=$(fmt_ms "$idb_ms") total=$(fmt_ms $(( $(now_ms) - runner_start_ms )))" >&2
+# Phase timing summary. "idb" is the whole idb client run, and the values
+# after it split it up (see run_idb_once).
+echo "note: timing stage=$(fmt_ms "$stage_ms") simulator=$(fmt_ms "$simulator_ms") companion=$(fmt_ms "$companion_ms") idb=$(fmt_ms "$idb_ms")${idb_breakdown:+ $idb_breakdown} total=$(fmt_ms $(( $(now_ms) - runner_start_ms )))" >&2
 
 # If a result bundle was requested, verify the companion actually produced one.
 # In idb's native (non-xcodebuild) test path, the .xcresult is not emitted by

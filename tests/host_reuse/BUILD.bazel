@@ -1,0 +1,149 @@
+# Targets for tests/validate.sh's host reuse checks: several test targets
+# sharing one test host, a host whose contents change with
+# --define=host_reuse=v2, and another host with the same bundle id. Every test
+# asserts that the host it runs in carries its own build's marker, so a reused
+# host that is not the build's fails the test.
+load("@rules_apple//apple:ios.bzl", "ios_application", "ios_ui_test", "ios_unit_test")
+load("@rules_idb//idb:idb_test_runner.bzl", "ios_idb_test_runner")
+load("@rules_swift//swift:swift.bzl", "swift_library")
+
+MINIMUM_OS_VERSION = "16.0"
+
+ios_idb_test_runner(
+    name = "runner",
+    device_type = "iPhone 17 Pro",
+)
+
+config_setting(
+    name = "v2",
+    define_values = {"host_reuse": "v2"},
+)
+
+# The host's marker is a resource only, so a changed marker leaves the host's
+# binary as it was.
+genrule(
+    name = "marker",
+    outs = ["marker/marker.txt"],
+    cmd = select({
+        ":v2": "printf v2 > $@",
+        "//conditions:default": "printf v1 > $@",
+    }),
+)
+
+genrule(
+    name = "other_marker",
+    outs = ["other_marker/marker.txt"],
+    cmd = select({
+        ":v2": "printf other-v2 > $@",
+        "//conditions:default": "printf other-v1 > $@",
+    }),
+)
+
+# What the tests expect the running host to carry.
+genrule(
+    name = "expected_src",
+    outs = ["Expected.swift"],
+    cmd = select({
+        ":v2": "printf 'let expectedMarker = \"v2\"\\nlet expectedOtherMarker = \"other-v2\"\\n' > $@",
+        "//conditions:default": "printf 'let expectedMarker = \"v1\"\\nlet expectedOtherMarker = \"other-v1\"\\n' > $@",
+    }),
+)
+
+swift_library(
+    name = "HostLib",
+    srcs = ["Host/AppDelegate.swift"],
+    module_name = "ReuseHost",
+)
+
+ios_application(
+    name = "Host",
+    bundle_id = "com.rulesidb.hostreuse.Host",
+    families = ["iphone"],
+    infoplists = ["Host/Info.plist"],
+    minimum_os_version = MINIMUM_OS_VERSION,
+    resources = [":marker"],
+    deps = [":HostLib"],
+)
+
+# The same bundle id as :Host, different contents.
+ios_application(
+    name = "OtherHost",
+    bundle_id = "com.rulesidb.hostreuse.Host",
+    families = ["iphone"],
+    infoplists = ["Host/Info.plist"],
+    minimum_os_version = MINIMUM_OS_VERSION,
+    resources = [":other_marker"],
+    deps = [":HostLib"],
+)
+
+swift_library(
+    name = "TestsLib",
+    testonly = True,
+    srcs = [
+        "Tests/ProbeTests.swift",
+        ":expected_src",
+    ],
+    module_name = "ReuseTests",
+)
+
+swift_library(
+    name = "OtherTestsLib",
+    testonly = True,
+    srcs = [
+        "Tests/OtherProbeTests.swift",
+        ":expected_src",
+    ],
+    module_name = "OtherReuseTests",
+)
+
+swift_library(
+    name = "UITestsLib",
+    testonly = True,
+    srcs = [
+        "Tests/ProbeUITests.swift",
+        ":expected_src",
+    ],
+    module_name = "ReuseUITests",
+)
+
+# Three targets with the same test host (and so the same test bundle id).
+[ios_unit_test(
+    name = name,
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":runner",
+    tags = ["manual"],
+    test_host = ":Host",
+    deps = [":TestsLib"],
+) for name in [
+    "TestsA",
+    "TestsB",
+    "TestsC",
+]]
+
+ios_unit_test(
+    name = "ShardedTests",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":runner",
+    shard_count = 2,
+    tags = ["manual"],
+    test_host = ":Host",
+    deps = [":TestsLib"],
+)
+
+ios_unit_test(
+    name = "OtherTests",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":runner",
+    tags = ["manual"],
+    test_host = ":OtherHost",
+    deps = [":OtherTestsLib"],
+)
+
+ios_ui_test(
+    name = "UITests",
+    minimum_os_version = MINIMUM_OS_VERSION,
+    runner = ":runner",
+    tags = ["manual"],
+    test_host = ":Host",
+    deps = [":UITestsLib"],
+)
